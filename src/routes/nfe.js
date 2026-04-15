@@ -197,6 +197,23 @@ router.post('/:companyId/upload-xml',
       const total = nfe.total?.ICMSTot;
       const accessKey = nfe['$']?.Id?.replace('NFe', '') || '';
 
+      // Extrair itens e buscar categoria pelo NCM
+      const dets = nfe.det ? (Array.isArray(nfe.det) ? nfe.det : [nfe.det]) : [];
+      let suggestedCategory = null;
+      let suggestedCategoryId = null;
+      if (dets.length > 0) {
+        const firstNCM = dets[0]?.prod?.NCM;
+        suggestedCategory = await getCategoryByNCM(firstNCM);
+        if (suggestedCategory) {
+          const { data: catData } = await supabase
+            .from('categories')
+            .select('id')
+            .ilike('name', '%' + suggestedCategory + '%')
+            .limit(1);
+          suggestedCategoryId = catData?.[0]?.id || null;
+        }
+      }
+
       const { data, error } = await supabase.from('nfe_entries').upsert({
         company_id:    req.companyId,
         access_key:    accessKey,
@@ -208,6 +225,7 @@ router.post('/:companyId/upload-xml',
         xml_data:      nfe,
         status:        'pending',
         imported_by:   req.user.id,
+        category_id:   suggestedCategoryId,
       }, { onConflict: 'access_key' });
 
       if (error) return res.status(400).json({ error: error.message });
@@ -217,5 +235,18 @@ router.post('/:companyId/upload-xml',
     }
   }
 );
+
+
+// Busca categoria pelo NCM do item
+async function getCategoryByNCM(ncmCode) {
+  if (!ncmCode) return null;
+  const prefix = ncmCode.replace(/\D/g, '').slice(0, 4);
+  const { data } = await supabase
+    .from('ncm_categories')
+    .select('category_name')
+    .like('ncm_code', prefix + '%')
+    .limit(1);
+  return data?.[0]?.category_name || null;
+}
 
 module.exports = router;
