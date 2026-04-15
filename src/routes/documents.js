@@ -198,7 +198,7 @@ router.get('/:companyId',
 
     let query = supabase
       .from('client_documents')
-      .select('*, users!client_user_id(name), categories(name)', { count: 'exact' })
+      .select('*, users!client_user_id(name)', { count: 'exact' })
       .eq('company_id', req.companyId)
       .order('created_at', { ascending: false })
       .range(Number(offset), Number(offset) + Number(limit) - 1);
