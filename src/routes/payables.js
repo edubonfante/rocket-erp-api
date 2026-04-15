@@ -89,7 +89,7 @@ router.delete('/:companyId/:id', authenticate, requireCompanyAccess, requirePerm
 
 
 // GET /api/payables/:companyId/query — consulta avançada
-router.get('/:companyId/query', auth, setCompany, async (req, res) => {
+router.get('/:companyId/query', authenticate, requireCompanyAccess, async (req, res) => {
   try {
     const { page=1, per_page=50, search='', status='', category_id='', supplier='', date_from='', date_to='' } = req.query;
     const offset = (parseInt(page)-1) * parseInt(per_page);
