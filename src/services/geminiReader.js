@@ -43,23 +43,32 @@ Estrutura obrigatória do JSON:
   "items": [
     {
       "description": "descrição do item",
+      "ncm": "código NCM 4-8 dígitos ou null",
       "quantity": número,
       "unit_price": número decimal,
-      "total": número decimal
+      "total": número decimal,
+      "category": "categoria do DRE para este item ou null"
     }
   ],
-  "suggested_category": "categoria contábil sugerida em português ou null",
+  "suggested_category": "categoria contábil geral do documento ou null",
   "confidence": número de 0 a 1 indicando confiança na leitura,
   "observations": "observações relevantes ou null",
   "raw_text": "texto completo extraído do documento"
 }
 
-Categorias disponíveis para suggested_category:
-Compras de Mercadoria, Matéria-Prima, Despesas com Pessoal, Aluguel,
-Energia Elétrica, Internet / Telefone, Água, Combustível, Manutenção,
-Marketing / Publicidade, Serviços Terceiros, Impostos / Taxas,
-Saúde / Farmácia, Alimentação, Transporte, Material de Escritório,
-Despesas Financeiras, Outros.
+Categorias disponíveis para o campo "category" de cada item e para "suggested_category":
+Bovinos, Aves, Suinos, Peixes, Embutidos, Laticinios, Hortifruti, Padaria,
+Secos, Massas Molhos e Temperos, Oleos e Azeites, Cafe e Sobremesas,
+Cervejas, Destilados, Agua e Refrigerantes, Energeticos,
+Embalagens e Descartaveis, Gelo, Congelados, Outros CMV,
+Taxa Recebimento Cartoes, Comissao iFood, Cupons iFood, Despesas com Banda,
+Salarios Salao, Salarios Delivery, Pro-Labore, Freelance Salao, Freelance Delivery,
+Horas Extras, FGTS, INSS, Ferias, Vale Transporte, Beneficios,
+Aluguel, IPTU, Energia Eletrica, Agua e Esgoto, Gas Encanado,
+Telefone Celular, Internet e Telefone, Manutencao Preventiva, Manutencao Corretiva,
+Higiene e Limpeza, Impostos e Taxas, PIS COFINS,
+Honorarios Contabeis, Sistema, Assessoria Juridica, Servicos Administrativos,
+Material de Escritorio, Despesas Diversas, Juros Bancarios, Outros.
 
 Seja preciso. Se não tiver certeza de um campo, use null.`;
 
