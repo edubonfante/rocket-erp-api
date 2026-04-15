@@ -56,19 +56,11 @@ Estrutura obrigatória do JSON:
   "raw_text": "texto completo extraído do documento"
 }
 
-Categorias disponíveis para o campo "category" de cada item e para "suggested_category":
+Categorias disponíveis para o campo "category" de cada item:
 Bovinos, Aves, Suinos, Peixes, Embutidos, Laticinios, Hortifruti, Padaria,
-Secos, Massas Molhos e Temperos, Oleos e Azeites, Cafe e Sobremesas,
-Cervejas, Destilados, Agua e Refrigerantes, Energeticos,
-Embalagens e Descartaveis, Gelo, Congelados, Outros CMV,
-Taxa Recebimento Cartoes, Comissao iFood, Cupons iFood, Despesas com Banda,
-Salarios Salao, Salarios Delivery, Pro-Labore, Freelance Salao, Freelance Delivery,
-Horas Extras, FGTS, INSS, Ferias, Vale Transporte, Beneficios,
-Aluguel, IPTU, Energia Eletrica, Agua e Esgoto, Gas Encanado,
-Telefone Celular, Internet e Telefone, Manutencao Preventiva, Manutencao Corretiva,
-Higiene e Limpeza, Impostos e Taxas, PIS COFINS,
-Honorarios Contabeis, Sistema, Assessoria Juridica, Servicos Administrativos,
-Material de Escritorio, Despesas Diversas, Juros Bancarios, Outros.
+Secos, Massas Molhos Temperos, Oleos Azeites, Cafe Sobremesas,
+Cervejas, Destilados, Agua Refrigerantes, Energeticos,
+Embalagens Descartaveis, Gelo, Congelados, Outros.
 
 Seja preciso. Se não tiver certeza de um campo, use null.`;
 
