@@ -39,6 +39,11 @@ router.post('/:companyId/upload',
     if (!req.file) return res.status(400).json({ error: 'Arquivo não enviado' });
 
     const { categoryId, forcePost, confirmedValue, confirmedDate } = req.body;
+      // Items com categorias escolhidas pelo usuário (vem do frontend)
+      let userItems = null;
+      if (req.body.items) {
+        try { userItems = JSON.parse(req.body.items); } catch(e) {}
+      }
 
     try {
       // 1. Upload para Supabase Storage
@@ -96,7 +101,7 @@ router.post('/:companyId/upload',
       const shouldPost = forcePost === 'true' || (docData.confidence >= 0.85 && docData.total_value > 0);
 
       if (shouldPost) {
-        const items = docData.items && docData.items.length > 0 ? docData.items : null;
+        const items = (userItems && userItems.length > 0) ? userItems : (docData.items && docData.items.length > 0 ? docData.items : null);
         const due = confirmedDate || docData.due_date || docData.issue_date || new Date().toISOString().split('T')[0];
         const supplier = docData.supplier_name || req.file.originalname;
         const docType = (docData.doc_type || 'DOC').toUpperCase();
