@@ -91,34 +91,76 @@ router.post('/:companyId/upload',
 
       if (docErr) throw new Error(docErr.message);
 
-      // 5. Cria lançamento se forcePost ou confiança >= 0.85
+      // 5. Cria lançamentos POR ITEM se forcePost ou confiança >= 0.85
       let payable = null;
       const shouldPost = forcePost === 'true' || (docData.confidence >= 0.85 && docData.total_value > 0);
 
       if (shouldPost) {
-        const value = confirmedValue ? parseFloat(confirmedValue) : docData.total_value;
-        const { data: p } = await supabase
-          .from('payables')
-          .insert({
-            company_id:  req.companyId,
-            category_id: resolvedCategoryId,
-            description: `${(docData.doc_type || 'DOC').toUpperCase()} — ${docData.supplier_name || req.file.originalname}`,
-            amount:      value,
-            due_date:    confirmedDate || docData.due_date || docData.issue_date || new Date().toISOString().split('T')[0],
-            origin:      'document',
-            origin_id:   doc.id,
-            status:      'open',
-            created_by:  req.user.id,
-            notes:       `Gemini: confiança ${Math.round((docData.confidence || 0)*100)}%`,
-          })
-          .select('id').single();
+        const items = docData.items && docData.items.length > 0 ? docData.items : null;
+        const due = confirmedDate || docData.due_date || docData.issue_date || new Date().toISOString().split('T')[0];
+        const supplier = docData.supplier_name || req.file.originalname;
+        const docType = (docData.doc_type || 'DOC').toUpperCase();
 
-        payable = p;
-
-        await supabase
-          .from('client_documents')
-          .update({ payable_id: p.id, status: forcePost ? 'posted' : 'auto_posted', reviewed_by: req.user.id, reviewed_at: new Date() })
-          .eq('id', doc.id);
+        if (items && items.length > 0) {
+          // Lança um payable por item
+          const payables = [];
+          for (const item of items) {
+            let itemCategoryId = resolvedCategoryId;
+            if (item.category) {
+              const { data: catData } = await supabase
+                .from('categories')
+                .select('id')
+                .ilike('name', '%' + item.category + '%')
+                .limit(1);
+              if (catData?.[0]?.id) itemCategoryId = catData[0].id;
+            }
+            const { data: p } = await supabase
+              .from('payables')
+              .insert({
+                company_id:  req.companyId,
+                category_id: itemCategoryId,
+                description: docType + ' — ' + supplier + ' | ' + item.description,
+                amount:      parseFloat(item.total || item.unit_price || 0),
+                due_date:    due,
+                origin:      'document',
+                origin_id:   doc.id,
+                status:      'open',
+                created_by:  req.user.id,
+                notes:       'NCM: ' + (item.ncm || '-') + ' | Qtd: ' + (item.quantity || 1) + ' | Gemini: ' + Math.round((docData.confidence||0)*100) + '%',
+              })
+              .select('id').single();
+            if (p) payables.push(p);
+          }
+          payable = payables[0];
+          if (payable) {
+            await supabase.from('client_documents')
+              .update({ payable_id: payable.id, status: forcePost ? 'posted' : 'auto_posted', reviewed_by: req.user.id, reviewed_at: new Date() })
+              .eq('id', doc.id);
+          }
+        } else {
+          const value = confirmedValue ? parseFloat(confirmedValue) : docData.total_value;
+          const { data: p } = await supabase
+            .from('payables')
+            .insert({
+              company_id:  req.companyId,
+              category_id: resolvedCategoryId,
+              description: docType + ' — ' + supplier,
+              amount:      value,
+              due_date:    due,
+              origin:      'document',
+              origin_id:   doc.id,
+              status:      'open',
+              created_by:  req.user.id,
+              notes:       'Gemini: confianca ' + Math.round((docData.confidence || 0)*100) + '%',
+            })
+            .select('id').single();
+          payable = p;
+          if (p) {
+            await supabase.from('client_documents')
+              .update({ payable_id: p.id, status: forcePost ? 'posted' : 'auto_posted', reviewed_by: req.user.id, reviewed_at: new Date() })
+              .eq('id', doc.id);
+          }
+        }
       }
 
       // Log
