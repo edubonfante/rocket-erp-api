@@ -10,7 +10,7 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 class GeminiDocReader {
 
   constructor() {
-    this.model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-lite' });
+    this.model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
   }
 
   /**
