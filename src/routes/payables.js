@@ -87,4 +87,34 @@ router.delete('/:companyId/:id', authenticate, requireCompanyAccess, requirePerm
   res.json({ message: 'Conta cancelada' });
 });
 
+
+// GET /api/payables/:companyId/query — consulta avançada
+router.get('/:companyId/query', auth, setCompany, async (req, res) => {
+  try {
+    const { page=1, per_page=50, search='', status='', category_id='', supplier='', date_from='', date_to='' } = req.query;
+    const offset = (parseInt(page)-1) * parseInt(per_page);
+
+    let query = supabase
+      .from('payables')
+      .select('*, category:categories(id,name)', { count: 'exact' })
+      .eq('company_id', req.companyId)
+      .order('due_date', { ascending: false })
+      .range(offset, offset + parseInt(per_page) - 1);
+
+    if (search) query = query.or(`description.ilike.%${search}%,supplier_name.ilike.%${search}%`);
+    if (status) query = query.eq('status', status);
+    if (category_id) query = query.eq('category_id', category_id);
+    if (supplier) query = query.ilike('supplier_name', `%${supplier}%`);
+    if (date_from) query = query.gte('due_date', date_from);
+    if (date_to) query = query.lte('due_date', date_to);
+
+    const { data, error, count } = await query;
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.json({ data, total: count, page: parseInt(page), per_page: parseInt(per_page) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
