@@ -179,3 +179,4 @@ Categorias disponíveis: ${availableCategories.join(', ')}
 }
 
 module.exports = new GeminiDocReader();
+// deploy ter 14 abr 2026 23:15:38 -03
