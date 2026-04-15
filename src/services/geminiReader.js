@@ -76,20 +76,8 @@ Seja preciso. Se não tiver certeza de um campo, use null.`;
       const text   = result.response.text().trim();
 
       // Remove possíveis blocos markdown que o modelo às vezes inclui
-      // Tentar extrair JSON mesmo se vier com texto extra
-      let clean = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-      // Se ainda nao for JSON valido, tentar extrair o primeiro { ... }
-      if (!clean.startsWith('{')) {
-        const match = clean.match(/\{[\s\S]*\}/);
-        if (match) clean = match[0];
-      }
-      let data;
-      try {
-        data = JSON.parse(clean);
-      } catch(parseErr) {
-        logger.error('Gemini JSON parse error. Raw text:', text.slice(0, 500));
-        throw new Error('JSON invalido do Gemini: ' + parseErr.message);
-      }
+      const clean = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const data  = JSON.parse(clean);
 
       logger.info(`Gemini leu documento: ${data.doc_type} | R$ ${data.total_value} | confiança: ${data.confidence}`);
       return { success: true, data };
