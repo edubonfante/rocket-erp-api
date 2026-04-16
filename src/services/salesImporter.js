@@ -35,7 +35,7 @@ class SalesImporter {
     let rows = [];
     const isImageSale = ['jpg','jpeg','png','webp','pdf'].includes(ext);
     if (['csv', 'txt'].includes(ext))          rows = this.parseCSV(buffer);
-    else if (['xlsx', 'xls'].includes(ext))    rows = this.parseExcel(buffer);
+    else if (['xlsx', 'xls'].includes(ext))    rows = this.parseExcel(buffer).rows;
     else if (ext === 'json')                   rows = this.parseJSON(buffer);
     else if (ext === 'xml')                    rows = await this.parseXML(buffer);
     else if (ext === 'ofx')                    rows = this.parseOFX(buffer.toString());
@@ -80,15 +80,26 @@ class SalesImporter {
     }
     if (['xlsx', 'xls'].includes(ext)) {
       const workbook = xlsx.read(buffer, { type: 'buffer', cellDates: true });
-      const sheetName = workbook.SheetNames[0];
-      const sheet = workbook.Sheets[sheetName];
-      if (!sheet) return [];
-      const tsv = xlsx.utils.sheet_to_csv(sheet, { FS: '\t' });
-      const head = tsv.split('\n').slice(0, 80).join('\n');
-      const result = await gemini.readSalesSnippet(filename, sheetName || 'Plan1', head);
+      const names = workbook.SheetNames || [];
+      const parts = [];
+      for (const sheetName of names.slice(0, 12)) {
+        const sheet = workbook.Sheets[sheetName];
+        if (!sheet) continue;
+        const tsv = xlsx.utils.sheet_to_csv(sheet, { FS: '\t' });
+        const lines = tsv.split('\n').filter((l) => l.replace(/[\s\t,;]/g, '').length > 0);
+        const snip = lines.slice(0, 55).join('\n');
+        if (snip.replace(/[\d./\-:\s]/g, '').trim().length < 6) continue;
+        parts.push({ sheetName, snippet: snip });
+      }
+      if (!parts.length) return [];
+      const result = await gemini.readSalesWorkbook(filename, parts);
       if (!result.success) throw new Error(result.error || 'Gemini não interpretou a planilha');
       const arr = Array.isArray(result.data?.sales) ? result.data.sales : [];
-      return arr.map((r) => ({ ...r, __gemini: true, __sheet: sheetName }));
+      return arr.map((r) => ({
+        ...r,
+        __gemini: true,
+        __sheet: r.__sheet || r.sheet || parts[0]?.sheetName,
+      }));
     }
     return [];
   }
@@ -128,10 +139,12 @@ class SalesImporter {
     });
   }
 
+  /** @returns {{ rows: object[], sheetNames: string[] }} */
   parseExcel(buffer) {
     const workbook = xlsx.read(buffer, { type: 'buffer', cellDates: true });
+    const sheetNames = workbook.SheetNames || [];
     const rows = [];
-    for (const sheetName of workbook.SheetNames) {
+    for (const sheetName of sheetNames) {
       const sheet = workbook.Sheets[sheetName];
       if (!sheet) continue;
       const json = xlsx.utils.sheet_to_json(sheet, { defval: null });
@@ -142,7 +155,17 @@ class SalesImporter {
         rows.push({ ...r, __sheet: sheetName });
       }
     }
-    return rows;
+    return { rows, sheetNames };
+  }
+
+  /** Lista nomes das abas (útil na prévia sem re-parse completo). */
+  listExcelSheetNames(buffer) {
+    try {
+      const workbook = xlsx.read(buffer, { type: 'buffer', cellDates: true });
+      return workbook.SheetNames || [];
+    } catch {
+      return [];
+    }
   }
 
   parseJSON(buffer) {

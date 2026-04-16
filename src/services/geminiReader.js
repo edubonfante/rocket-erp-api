@@ -157,10 +157,6 @@ Responda SOMENTE com JSON válido, sem markdown.
   }
 
   /**
-   * Sugere categoria para um lançamento baseado na descrição e histórico.
-   * Útil para a conciliação bancária.
-   */
-  /**
    * Interpreta trecho de planilha/CSV de vendas e devolve linhas normalizadas.
    * Usado quando o parser heurístico não encontra colunas de data/valor.
    */
@@ -196,9 +192,48 @@ Regras:
     }
   }
 
+  /**
+   * Várias abas de Excel: envia trechos rotulados e recebe um único array `sales`.
+   */
+  async readSalesWorkbook(filename, sheetParts) {
+    const parts = (sheetParts || []).filter((p) => p.snippet && String(p.snippet).trim());
+    if (!parts.length) return { success: false, error: 'Sem trechos de planilha', data: null };
+    const body = parts
+      .map((p) => `#### Aba "${String(p.sheetName || 'Planilha').replace(/"/g, '')}"\n${String(p.snippet).slice(0, 3500)}`)
+      .join('\n\n')
+      .slice(0, 16000);
+    const prompt = `Você interpreta arquivos de VENDAS (Excel) brasileiros com UMA OU MAIS ABAS.
+Arquivo: ${filename}
+
+Abaixo há trechos de várias abas (cabeçalho + linhas). Cada aba pode ter colunas diferentes.
+Extraia TODAS as linhas que representam vendas/recebimentos em qualquer aba. Ignore totais, subtotais, linhas em branco e cabeçalhos repetidos.
+
+${body}
+
+Responda SOMENTE com JSON válido, sem markdown:
+{"sales":[{"sale_date":"YYYY-MM-DD","gross_value":0,"discount":0,"net_value":0,"payment_method":"pix|dinheiro|credito|debito|boleto|transferencia|voucher|cupom|outros|null","quantity":1,"cancelled":false,"__sheet":"nome da aba se souber"}]}
+
+Use __sheet quando conseguir inferir a aba. Se não houver vendas: {"sales":[]}.`;
+
+    try {
+      const result = await this.model.generateContent(prompt);
+      const text = result.response.text().replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const data = JSON.parse(text);
+      if (!data || !Array.isArray(data.sales)) return { success: false, error: 'Resposta sem array sales', data: null };
+      return { success: true, data };
+    } catch (err) {
+      logger.error('Gemini readSalesWorkbook error:', err.message);
+      return { success: false, error: err.message, data: null };
+    }
+  }
+
+  /**
+   * Sugere categoria para um lançamento baseado na descrição e histórico.
+   * Útil para a conciliação bancária.
+   */
   async suggestCategory(description, amount, availableCategories, history = []) {
     const prompt = `Você é um contador brasileiro especialista em classificação contábil.
-Classifique o lançamento abaixo em uma das categorias disponíveis.
+Classifique o lançamento bancário abaixo escolhendo UMA das categorias da lista.
 Responda SOMENTE com JSON, sem markdown.
 
 Lançamento: "${description}"
@@ -206,12 +241,13 @@ Valor: R$ ${Math.abs(amount)} (${amount < 0 ? 'débito/saída' : 'crédito/entra
 
 Histórico de classificações similares: ${JSON.stringify(history.slice(0,5))}
 
-Categorias disponíveis: ${availableCategories.join(', ')}
+Lista EXATA de categorias (copie o texto de uma delas, caractere por caractere, inclusive acentos):
+${availableCategories.map((n) => `- ${n}`).join('\n')}
 
 {
-  "category": "nome exato da categoria escolhida",
+  "category": "deve ser EXATAMENTE igual a um dos itens da lista acima (copie o nome)",
   "confidence": número de 0 a 1,
-  "reason": "motivo da classificação em uma frase"
+  "reason": "motivo em uma frase curta"
 }`;
 
     try {

@@ -151,6 +151,14 @@ router.post('/:companyId/upload',
               const mid = matchCompanyCategoryId(uploadCats, String(item.category), { preferTypes: ['despesa', 'ambos'] });
               if (mid) itemCategoryId = mid;
             }
+            if (!itemCategoryId && (item.description || item.desc)) {
+              const mid = matchCompanyCategoryId(uploadCats, String(item.description || item.desc), { preferTypes: ['despesa', 'ambos'] });
+              if (mid) itemCategoryId = mid;
+            }
+            if (!itemCategoryId && docData.suggested_category) {
+              const mid = matchCompanyCategoryId(uploadCats, String(docData.suggested_category), { preferTypes: ['despesa', 'ambos'] });
+              if (mid) itemCategoryId = mid;
+            }
             const itemGross = salesImporter.parseMoneyBr(item.total ?? (salesImporter.parseMoneyBr(item.unit_price) * (item.quantity || 1)));
             const itemDiscount = allocDiscount(itemGross);
             const itemNet = Math.max(itemGross - itemDiscount, 0);
@@ -408,6 +416,14 @@ router.post('/:companyId/:documentId/launch-items',
       const catName = item.category || item.catName;
       if (catName) {
         const mid = matchCompanyCategoryId(companyCats, String(catName), { preferTypes: ['despesa', 'ambos'] });
+        if (mid) itemCategoryId = mid;
+      }
+      if (!itemCategoryId && (item.description || item.desc)) {
+        const mid = matchCompanyCategoryId(companyCats, String(item.description || item.desc), { preferTypes: ['despesa', 'ambos'] });
+        if (mid) itemCategoryId = mid;
+      }
+      if (!itemCategoryId && docData.suggested_category) {
+        const mid = matchCompanyCategoryId(companyCats, String(docData.suggested_category), { preferTypes: ['despesa', 'ambos'] });
         if (mid) itemCategoryId = mid;
       }
       if (item.category_id) itemCategoryId = item.category_id;

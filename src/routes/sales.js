@@ -33,6 +33,10 @@ router.post('/:companyId/preview',
       const excelSheets = [...new Set(
         rows.map((r) => (r.raw_data && r.raw_data.__sheet) || null).filter(Boolean)
       )];
+      const ext = req.file.originalname.split('.').pop().toLowerCase();
+      const workbookTabs = ['xlsx', 'xls'].includes(ext)
+        ? importer.listExcelSheetNames(req.file.buffer)
+        : null;
 
       res.json({
         filename:   req.file.originalname,
@@ -41,6 +45,7 @@ router.post('/:companyId/preview',
         total_rows: rows.length,
         fieldMap:   Object.keys(rows[0] || {}),
         excel_sheets: excelSheets.length ? excelSheets : null,
+        excel_workbook_tabs: workbookTabs && workbookTabs.length ? workbookTabs : null,
       });
     } catch (err) {
       logger.error('Import preview error:', err);

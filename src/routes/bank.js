@@ -5,13 +5,43 @@ const gemini  = require('../services/geminiReader');
 const importer = require('../services/salesImporter');
 const { authenticate, requireCompanyAccess, requirePermission } = require('../middlewares/auth');
 const logger = require('../utils/logger');
+const { matchCompanyCategoryId } = require('../utils/categoryMatch');
+const { bankCategoryHint } = require('../utils/bankCategoryHints');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+/** Extrai texto útil da linha (planilhas BR: Histórico, Descrição, etc.). */
+function pickBankDescriptionFromRow(r) {
+  const raw = r.raw_data && typeof r.raw_data === 'object' ? r.raw_data : r;
+  const keyOrder = [
+    'Histórico', 'HISTORICO', 'historico', 'Historico',
+    'Descrição', 'DESCRICAO', 'Descricao', 'descricao',
+    'Lançamento', 'Detalhe', 'Identificação', 'Identificacao',
+    'Nome', 'Estabelecimento', 'Favorecido', 'Beneficiário', 'Beneficiario',
+    'Memo', 'MEMO', 'memo', 'Texto', 'Observação', 'Observacao',
+  ];
+  for (const k of keyOrder) {
+    const v = raw[k];
+    if (v != null && String(v).trim()) return String(v).trim().slice(0, 300);
+  }
+  for (const [k, v] of Object.entries(raw)) {
+    if (String(k).startsWith('__')) continue;
+    if (v == null) continue;
+    const s = String(v).trim();
+    if (s.length < 4) continue;
+    if (/^\d+([.,]\d+)?$/.test(s)) continue;
+    const lk = String(k).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    if (/data|valor|saldo|date|amount|venc|qtd|codigo|cod\b|id\b|sheet/i.test(lk)) continue;
+    return s.slice(0, 300);
+  }
+  const memo = r.memo || raw.memo || raw.MEMO || '';
+  return String(memo || 'Movimentação').slice(0, 300);
+}
 
 function toBankTransactions(rows) {
   const today = new Date().toISOString().split('T')[0];
   return (rows || []).map((r) => {
-    const memo = r.memo || r.raw_data?.memo || r.raw_data?.MEMO || r.raw_data?.description || '';
+    const desc = pickBankDescriptionFromRow(r);
     let signed = null;
     if (r.raw_data && typeof r.raw_data.amount === 'number' && !Number.isNaN(r.raw_data.amount)) {
       signed = r.raw_data.amount;
@@ -23,7 +53,7 @@ function toBankTransactions(rows) {
     }
     return {
       entry_date: r.sale_date && String(r.sale_date).slice(0, 10) ? String(r.sale_date).slice(0, 10) : today,
-      description: String(memo || 'Movimentação').slice(0, 300),
+      description: desc,
       amount: Math.round(signed * 100) / 100,
       balance: r.balance != null ? parseFloat(r.balance) : null,
     };
@@ -83,25 +113,39 @@ router.post('/:companyId/import',
       }
 
       const { data: cats } = await supabase.from('categories')
-        .select('id,name').eq('company_id', req.companyId).eq('active', true);
-      const catNames = (cats || []).map((c) => c.name);
+        .select('id,name,type')
+        .or(`company_id.eq.${req.companyId},company_id.is.null`)
+        .eq('active', true);
+      const catList = cats || [];
+      const catNames = catList.map((c) => c.name);
+      const preferTypes = (amt) => (amt < 0 ? ['despesa', 'ambos'] : ['receita', 'ambos']);
 
       const inserted = [];
       for (let i = 0; i < transactions.length; i += 5) {
         const batch = transactions.slice(i, i + 5);
         await Promise.all(batch.map(async (t) => {
-          let suggestion = { category: null, confidence: 0 };
-          try {
-            if (t.description && catNames.length) {
-              suggestion = await gemini.suggestCategory(t.description, t.amount, catNames);
-            }
-          } catch (e) {
-            logger.warn('suggestCategory skipped:', e.message);
+          const pref = preferTypes(t.amount);
+          let catId = null;
+          let aiSuggestion = null;
+
+          const ruleHint = bankCategoryHint(t.description, t.amount);
+          if (ruleHint) {
+            catId = matchCompanyCategoryId(catList, ruleHint, { preferTypes: pref });
+            if (catId) aiSuggestion = ruleHint;
           }
 
-          const catId = suggestion.category
-            ? cats?.find((c) => c.name === suggestion.category)?.id
-            : null;
+          let suggestion = { category: null, confidence: 0 };
+          if (!catId && t.description && catNames.length && process.env.GEMINI_API_KEY) {
+            try {
+              suggestion = await gemini.suggestCategory(t.description, t.amount, catNames);
+            } catch (e) {
+              logger.warn('suggestCategory skipped:', e.message);
+            }
+            if (suggestion.category) {
+              aiSuggestion = suggestion.category;
+              catId = matchCompanyCategoryId(catList, suggestion.category, { preferTypes: pref });
+            }
+          }
 
           const { data: entry, error: entErr } = await supabase.from('bank_entries').insert({
             company_id: req.companyId,
@@ -111,8 +155,8 @@ router.post('/:companyId/import',
             amount: t.amount,
             balance: t.balance,
             category_id: catId,
-            ai_suggestion: suggestion.category,
-            status: 'pending',
+            ai_suggestion: aiSuggestion,
+            status: catId ? 'classified' : 'pending',
           }).select('id').single();
 
           if (entErr) {
@@ -141,7 +185,7 @@ router.get('/:companyId/entries',
   async (req, res) => {
     const { status = 'pending', statementId } = req.query;
     let q = supabase.from('bank_entries')
-      .select('*, categories(name,color)')
+      .select('*, categories(id,name,color)')
       .eq('company_id', req.companyId)
       .order('entry_date', { ascending: false });
 
