@@ -414,13 +414,12 @@ router.post('/:companyId/:documentId/launch-items',
     const docType = (docData.doc_type || doc.doc_type || 'DOC').toUpperCase();
     const docLevelPayment = docData.payment_method || null;
     const totalDiscount = docData.discount != null ? salesImporter.parseMoneyBr(docData.discount) : 0;
-    const itemGrossSum = userItems.reduce((s, it) => {
-      const g = salesImporter.parseMoneyBr(it.total ?? (salesImporter.parseMoneyBr(it.unit_price) * (it.quantity || 1)));
-      return s + g;
-    }, 0);
+    const lineGross = (it) => salesImporter.parseMoneyBr(it.total ?? (salesImporter.parseMoneyBr(it.unit_price) * (it.quantity || 1)));
+    const geminiItemsForDiscount = Array.isArray(docData.items) && docData.items.length ? docData.items : userItems;
+    const itemGrossSumFull = geminiItemsForDiscount.reduce((s, it) => s + lineGross(it), 0);
     const allocDiscount = (gross) => {
-      if (!totalDiscount || !itemGrossSum || !gross) return 0;
-      return Math.round(totalDiscount * (gross / itemGrossSum) * 100) / 100;
+      if (!totalDiscount || !itemGrossSumFull || !gross) return 0;
+      return Math.round(totalDiscount * (gross / itemGrossSumFull) * 100) / 100;
     };
 
     const payables = [];
@@ -445,7 +444,7 @@ router.post('/:companyId/:documentId/launch-items',
         }
       }
 
-      const itemGross = salesImporter.parseMoneyBr(item.total ?? (salesImporter.parseMoneyBr(item.unit_price) * (item.quantity || 1)));
+      const itemGross = lineGross(item);
       const itemDiscount = allocDiscount(itemGross);
       const itemNet = Math.max(itemGross - itemDiscount, 0);
       const desc = (item.description || 'Item').toString();

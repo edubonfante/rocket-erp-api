@@ -263,6 +263,35 @@ router.get('/:companyId/entries',
   }
 );
 
+// PATCH /api/bank/:companyId/entries/bulk-classify — classifica vários pendentes de uma vez
+router.patch('/:companyId/entries/bulk-classify',
+  authenticate, requireCompanyAccess, requirePermission('conciliacao'),
+  async (req, res) => {
+    const rawIds = Array.isArray(req.body.ids) ? req.body.ids : [];
+    const ids = [...new Set(rawIds.map((x) => String(x || '').trim()).filter(Boolean))].slice(0, 500);
+    const { categoryId, status = 'classified' } = req.body;
+    if (!ids.length) return res.status(400).json({ error: 'Informe ao menos um lançamento (ids).' });
+
+    const { data: clsCats } = await supabase.from('categories')
+      .select('id')
+      .or(`company_id.eq.${req.companyId},company_id.is.null`)
+      .eq('active', true);
+    const safeCat = categoryIdIfAllowed(categoryId, clsCats || []);
+
+    const { data: updated, error } = await supabase
+      .from('bank_entries')
+      .update({ category_id: safeCat, status })
+      .eq('company_id', req.companyId)
+      .eq('status', 'pending')
+      .in('id', ids)
+      .select('id');
+
+    if (error) return res.status(400).json({ error: error.message });
+    const n = (updated || []).length;
+    res.json({ message: n ? `${n} lançamento(s) classificado(s)` : 'Nenhum lançamento pendente foi atualizado (confira os itens selecionados).`, count: n });
+  }
+);
+
 // PATCH /api/bank/:companyId/entries/:id/classify — classifica entrada
 router.patch('/:companyId/entries/:id/classify',
   authenticate, requireCompanyAccess, requirePermission('conciliacao'),

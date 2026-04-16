@@ -173,4 +173,49 @@ router.get('/:companyId/imports',
   }
 );
 
+// GET /api/sales/:companyId/imports/:importId — drill-down: linhas salvas para comparar com o arquivo
+router.get('/:companyId/imports/:importId',
+  authenticate, requireCompanyAccess, requirePermission('vendas'),
+  async (req, res) => {
+    const { importId } = req.params;
+    const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
+    const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
+
+    const { data: imp, error: impErr } = await supabase
+      .from('sale_imports')
+      .select('*, users(name)')
+      .eq('id', importId)
+      .eq('company_id', req.companyId)
+      .single();
+
+    if (impErr || !imp) return res.status(404).json({ error: 'Importação não encontrada' });
+
+    const { data: lines, error: lErr, count } = await supabase
+      .from('sales')
+      .select('id, sale_date, gross_value, discount, net_value, payment_method, quantity, cancelled, raw_data', { count: 'exact' })
+      .eq('company_id', req.companyId)
+      .eq('import_id', importId)
+      .order('sale_date', { ascending: true })
+      .order('id', { ascending: true })
+      .range(offset, offset + limit - 1);
+
+    if (lErr) return res.status(500).json({ error: lErr.message });
+
+    const pageLines = lines || [];
+    const pageSumNet = Math.round(pageLines.reduce((s, r) => s + parseFloat(r.net_value || 0), 0) * 100) / 100;
+
+    res.json({
+      import: imp,
+      lines: pageLines,
+      total: typeof count === 'number' ? count : imp.record_count,
+      pagination: { limit, offset, returned: pageLines.length },
+      aggregates: {
+        import_total_net: parseFloat(imp.total_value) || 0,
+        import_record_count: imp.record_count,
+        current_page_sum_net: pageSumNet,
+      },
+    });
+  }
+);
+
 module.exports = router;
