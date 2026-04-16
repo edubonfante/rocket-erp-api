@@ -16,6 +16,15 @@ function coercePgDate(val) {
   return null;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Evita enviar "" ou texto inválido para category_id (Postgres uuid). */
+function cleanCategoryId(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (!s || s === 'undefined' || s === 'null') return null;
+  return UUID_RE.test(s) ? s : null;
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
@@ -111,7 +120,7 @@ router.post('/:companyId/upload',
           confirmed_value: confirmedVal,
           supplier_name:   docData.supplier_name,
           supplier_cnpj:   docData.supplier_cnpj,
-          category_id:     resolvedCategoryId,
+          category_id:     cleanCategoryId(resolvedCategoryId) || null,
           gemini_data:     docData,
           confidence:      docData.confidence || 0,
           status:          'pending',
@@ -173,7 +182,7 @@ router.post('/:companyId/upload',
               .from('payables')
               .insert({
                 company_id:  req.companyId,
-                category_id: itemCategoryId,
+                category_id: cleanCategoryId(itemCategoryId) || null,
                 description: (docType + ' — ' + supplier + ' | ' + itemDesc).slice(0, 300),
                 amount:      itemNet,
                 due_date:    due,
@@ -215,7 +224,7 @@ router.post('/:companyId/upload',
             .from('payables')
             .insert({
               company_id:  req.companyId,
-              category_id: resolvedCategoryId,
+              category_id: cleanCategoryId(resolvedCategoryId) || null,
               description: (docType + ' — ' + supplier).slice(0, 300),
               amount:      value,
               due_date:    due,
@@ -421,20 +430,24 @@ router.post('/:companyId/:documentId/launch-items',
     const payables = [];
     for (const item of userItems) {
       let itemCategoryId = resolvedCategoryId;
-      const catName = item.category || item.catName;
-      if (catName) {
-        const mid = matchCompanyCategoryId(companyCats, String(catName), { preferTypes: ['despesa', 'ambos'] });
-        if (mid) itemCategoryId = mid;
+      const explicitCat = cleanCategoryId(item.category_id) || cleanCategoryId(item.catId);
+      if (explicitCat) {
+        itemCategoryId = explicitCat;
+      } else {
+        const catName = item.category || item.catName;
+        if (catName) {
+          const mid = matchCompanyCategoryId(companyCats, String(catName), { preferTypes: ['despesa', 'ambos'] });
+          if (mid) itemCategoryId = mid;
+        }
+        if (!itemCategoryId && (item.description || item.desc)) {
+          const mid = matchCompanyCategoryId(companyCats, String(item.description || item.desc), { preferTypes: ['despesa', 'ambos'] });
+          if (mid) itemCategoryId = mid;
+        }
+        if (!itemCategoryId && docData.suggested_category) {
+          const mid = matchCompanyCategoryId(companyCats, String(docData.suggested_category), { preferTypes: ['despesa', 'ambos'] });
+          if (mid) itemCategoryId = mid;
+        }
       }
-      if (!itemCategoryId && (item.description || item.desc)) {
-        const mid = matchCompanyCategoryId(companyCats, String(item.description || item.desc), { preferTypes: ['despesa', 'ambos'] });
-        if (mid) itemCategoryId = mid;
-      }
-      if (!itemCategoryId && docData.suggested_category) {
-        const mid = matchCompanyCategoryId(companyCats, String(docData.suggested_category), { preferTypes: ['despesa', 'ambos'] });
-        if (mid) itemCategoryId = mid;
-      }
-      if (item.category_id) itemCategoryId = item.category_id;
 
       const itemGross = salesImporter.parseMoneyBr(item.total ?? (salesImporter.parseMoneyBr(item.unit_price) * (item.quantity || 1)));
       const itemDiscount = allocDiscount(itemGross);
@@ -449,7 +462,7 @@ router.post('/:companyId/:documentId/launch-items',
         .from('payables')
         .insert({
           company_id:       req.companyId,
-          category_id:      itemCategoryId,
+          category_id:      cleanCategoryId(itemCategoryId) || null,
           description:      (docType + ' — ' + supplier + ' | ' + desc).slice(0, 300),
           amount:           itemNet,
           due_date:         due,
@@ -458,7 +471,7 @@ router.post('/:companyId/:documentId/launch-items',
           status:           'open',
           created_by:       req.user.id,
           supplier_name:    supplier,
-          item_description: desc,
+          item_description: desc.slice(0, 300),
           payment_method:   itemPayment,
           gross_amount:     itemGross,
           discount_amount:  itemDiscount,
@@ -590,7 +603,7 @@ router.patch('/:companyId/:id/confirm',
       .from('payables')
       .insert({
         company_id:  req.companyId,
-        category_id: categoryId || doc.category_id,
+        category_id: cleanCategoryId(categoryId) || cleanCategoryId(doc.category_id) || null,
         description: `${(doc.doc_type||'DOC').toUpperCase()} — ${doc.supplier_name || doc.file_name}`,
         amount:      confirmedValue || doc.detected_value,
         due_date:    confirmedDate || doc.detected_date || new Date().toISOString().split('T')[0],

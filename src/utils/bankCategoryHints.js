@@ -28,8 +28,8 @@ function bankCategoryHint(description, amount) {
     { re: /tarifa|taxa banc|cesta de|manutencao conta|iof operac/, hint: 'Despesas Financeiras' },
     { re: /marketing|google ads|facebook ads|meta ads|publicidade/, hint: 'Marketing / Publicidade' },
     { re: /manutencao|conserto|peca|oficina/, hint: 'Manutenção' },
-    { re: /fornecedor|mercador|supermercado|atacado|distrib/, hint: 'Compras de Mercadoria' },
-    { re: /boleto pag|transferencia enviad|pix enviad|ted enviad|doc pag|pagamento/, hint: 'Compras de Mercadoria' },
+    { re: /supermercado|atacad(o|ista)|mercadoria|distribuidor|fornecedor.*(nf|nota|boleto)/, hint: 'Compras de Mercadoria' },
+    { re: /boleto\s+(pag|pago)|transferencia\s+enviad|pix\s+enviad|ted\s+enviad|doc\s+pag/, hint: 'Compras de Mercadoria' },
   ];
 
   const inRules = [

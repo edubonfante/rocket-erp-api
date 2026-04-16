@@ -10,20 +10,54 @@ const { bankCategoryHint } = require('../utils/bankCategoryHints');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
-/** Extrai texto útil da linha (planilhas BR: Histórico, Descrição, etc.). */
+function normalizeHeaderKey(k) {
+  return String(k || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+/** Extrai descrição rica do extrato (colunas Lançamento, Nome, Histórico etc., com chaves normalizadas). */
 function pickBankDescriptionFromRow(r) {
   const raw = r.raw_data && typeof r.raw_data === 'object' ? r.raw_data : r;
-  const keyOrder = [
-    'Histórico', 'HISTORICO', 'historico', 'Historico',
-    'Descrição', 'DESCRICAO', 'Descricao', 'descricao',
-    'Lançamento', 'Detalhe', 'Identificação', 'Identificacao',
-    'Nome', 'Estabelecimento', 'Favorecido', 'Beneficiário', 'Beneficiario',
-    'Memo', 'MEMO', 'memo', 'Texto', 'Observação', 'Observacao',
-  ];
-  for (const k of keyOrder) {
-    const v = raw[k];
-    if (v != null && String(v).trim()) return String(v).trim().slice(0, 300);
+  const byNorm = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (String(k).startsWith('__')) continue;
+    byNorm[normalizeHeaderKey(k)] = { orig: k, val: v };
   }
+
+  const cell = (...hints) => {
+    for (const h of hints) {
+      const nh = normalizeHeaderKey(h).replace(/\s/g, '');
+      for (const [kn, { val }] of Object.entries(byNorm)) {
+        const kk = kn.replace(/\s/g, '');
+        if (kk === nh || kk.includes(nh) || nh.includes(kk)) {
+          if (val == null) continue;
+          const s = String(val).trim();
+          if (s.length >= 2 && !/^\d+([.,]\d+)?$/.test(s)) return s;
+        }
+      }
+    }
+    return '';
+  };
+
+  const lanc = cell('lancamento', 'lançamento', 'movimento', 'movimentacao', 'tipo lancamento', 'tipo de lancamento', 'operacao', 'operação');
+  const nome = cell('nome', 'favorecido', 'beneficiario', 'beneficiário', 'credenciado', 'estabelecimento', 'titular', 'razao social', 'razão social');
+  const hist = cell('historico', 'histórico', 'descricao', 'descrição', 'detalhe', 'identificacao', 'identificação', 'complemento', 'texto', 'observacao', 'observação');
+  const memo = cell('memo', 'informacao', 'informação');
+
+  const merged = [lanc, nome].filter(Boolean);
+  if (hist && merged.length) {
+    const hlow = hist.toLowerCase();
+    const redundant = merged.some((m) => m.toLowerCase().includes(hlow) || hlow.includes(m.toLowerCase()));
+    if (!redundant) merged.push(hist);
+  } else if (hist) merged.push(hist);
+  if (!merged.length && memo) merged.push(memo);
+  if (merged.length) return merged.join(' — ').slice(0, 300);
+
+  const scored = [];
   for (const [k, v] of Object.entries(raw)) {
     if (String(k).startsWith('__')) continue;
     if (v == null) continue;
@@ -31,11 +65,16 @@ function pickBankDescriptionFromRow(r) {
     if (s.length < 4) continue;
     if (/^\d+([.,]\d+)?$/.test(s)) continue;
     const lk = String(k).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-    if (/data|valor|saldo|date|amount|venc|qtd|codigo|cod\b|id\b|sheet/i.test(lk)) continue;
-    return s.slice(0, 300);
+    if (/data|valor|saldo|date|amount|venc|qtd|codigo|cod\b|id\b|sheet|agencia|conta|banco/i.test(lk)) continue;
+    let score = 5;
+    if (/lanc|nome|hist|descr|detalhe|favorec|benef|texto|memo/i.test(lk)) score += 40;
+    scored.push({ score, s: s.slice(0, 300) });
   }
-  const memo = r.memo || raw.memo || raw.MEMO || '';
-  return String(memo || 'Movimentação').slice(0, 300);
+  scored.sort((a, b) => b.score - a.score);
+  if (scored.length) return scored[0].s;
+
+  const m = r.memo || raw.memo || raw.MEMO || '';
+  return String(m || 'Movimentação').slice(0, 300);
 }
 
 function toBankTransactions(rows) {
@@ -128,22 +167,29 @@ router.post('/:companyId/import',
           let catId = null;
           let aiSuggestion = null;
 
-          const ruleHint = bankCategoryHint(t.description, t.amount);
+          const descTrim = String(t.description || '').trim();
+          const ruleHint = descTrim.length >= 6 ? bankCategoryHint(t.description, t.amount) : null;
           if (ruleHint) {
             catId = matchCompanyCategoryId(catList, ruleHint, { preferTypes: pref });
             if (catId) aiSuggestion = ruleHint;
           }
 
           let suggestion = { category: null, confidence: 0 };
-          if (!catId && t.description && catNames.length && process.env.GEMINI_API_KEY) {
+          if (!catId && descTrim.length >= 4 && catNames.length && process.env.GEMINI_API_KEY) {
             try {
               suggestion = await gemini.suggestCategory(t.description, t.amount, catNames);
             } catch (e) {
               logger.warn('suggestCategory skipped:', e.message);
             }
-            if (suggestion.category) {
-              aiSuggestion = suggestion.category;
-              catId = matchCompanyCategoryId(catList, suggestion.category, { preferTypes: pref });
+            const conf = Number(suggestion.confidence) || 0;
+            const rawCat = suggestion.category;
+            const catStr = rawCat != null && String(rawCat).trim().toLowerCase() !== 'null' ? String(rawCat).trim() : '';
+            if (catStr && conf >= 0.58) {
+              const matched = matchCompanyCategoryId(catList, catStr, { preferTypes: pref });
+              if (matched) {
+                aiSuggestion = catStr;
+                catId = matched;
+              }
             }
           }
 

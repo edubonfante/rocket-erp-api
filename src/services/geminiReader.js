@@ -233,8 +233,13 @@ Use __sheet quando conseguir inferir a aba. Se não houver vendas: {"sales":[]}.
    */
   async suggestCategory(description, amount, availableCategories, history = []) {
     const prompt = `Você é um contador brasileiro especialista em classificação contábil.
-Classifique o lançamento bancário abaixo escolhendo UMA das categorias da lista.
-Responda SOMENTE com JSON, sem markdown.
+Classifique o lançamento bancário abaixo escolhendo NO MÁXIMO UMA categoria da lista (ou deixe category null se não houver evidência clara no texto).
+
+Regras:
+- Baseie-se EXCLUSIVAMENTE no texto do lançamento (nome do favorecido, descrição do PIX/TED, estabelecimento, etc.).
+- NÃO invente contexto (ex.: não assuma "compra de mercadoria" só porque é um pagamento genérico).
+- NÃO escolha categoria genérica se o texto não contiver palavras relacionadas a ela.
+- Se o texto for vago ("TRANSF", "PAG", "PIX") sem setor ou fornecedor identificável, use category: null e confidence baixa.
 
 Lançamento: "${description}"
 Valor: R$ ${Math.abs(amount)} (${amount < 0 ? 'débito/saída' : 'crédito/entrada'})
@@ -245,7 +250,7 @@ Lista EXATA de categorias (copie o texto de uma delas, caractere por caractere, 
 ${availableCategories.map((n) => `- ${n}`).join('\n')}
 
 {
-  "category": "deve ser EXATAMENTE igual a um dos itens da lista acima (copie o nome)",
+  "category": "EXATAMENTE um item da lista acima, ou null se não houver correspondência clara",
   "confidence": número de 0 a 1,
   "reason": "motivo em uma frase curta"
 }`;
