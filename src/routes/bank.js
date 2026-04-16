@@ -147,6 +147,7 @@ router.post('/:companyId/import',
             }
           }
 
+          /* Mantém "pending" na lista padrão mesmo com categoria sugerida — evita "sumir" da aba Pendentes. */
           const { data: entry, error: entErr } = await supabase.from('bank_entries').insert({
             company_id: req.companyId,
             statement_id: stmt.id,
@@ -156,7 +157,7 @@ router.post('/:companyId/import',
             balance: t.balance,
             category_id: catId,
             ai_suggestion: aiSuggestion,
-            status: catId ? 'classified' : 'pending',
+            status: 'pending',
           }).select('id').single();
 
           if (entErr) {

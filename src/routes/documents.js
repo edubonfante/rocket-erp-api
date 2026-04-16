@@ -166,12 +166,15 @@ router.post('/:companyId/upload',
             const itemPaymentA = rawPayA != null && String(rawPayA).trim() !== ''
               ? salesImporter.normalizePayment(rawPayA)
               : (docLevelPaymentAuto ? salesImporter.normalizePayment(docLevelPaymentAuto) : null);
-            const { data: p } = await supabase
+            const itemDesc = (item.description != null && String(item.description).trim())
+              ? String(item.description).trim()
+              : 'Item';
+            const { data: p, error: insErr } = await supabase
               .from('payables')
               .insert({
                 company_id:  req.companyId,
                 category_id: itemCategoryId,
-                description: docType + ' — ' + supplier + ' | ' + item.description,
+                description: (docType + ' — ' + supplier + ' | ' + itemDesc).slice(0, 300),
                 amount:      itemNet,
                 due_date:    due,
                 origin:      'document',
@@ -179,38 +182,41 @@ router.post('/:companyId/upload',
                 status:      'open',
                 created_by:  req.user.id,
                 supplier_name: supplier,
-                item_description: item.description || null,
+                item_description: itemDesc.slice(0, 300),
                 payment_method: itemPaymentA,
                 gross_amount: itemGross,
                 discount_amount: itemDiscount,
                 notes:       'NCM: ' + (item.ncm || '-') + ' | Qtd: ' + (item.quantity || 1) + ' | Gemini: ' + Math.round((docData.confidence||0)*100) + '%',
               })
               .select('id').single();
+            if (insErr) throw new Error('Erro ao criar lançamento (item): ' + insErr.message);
             if (p) payables.push(p);
           }
           payable = payables[0];
           if (payable) {
             await supabase.from('client_documents')
-              .update({ payable_id: payable.id, status: forcePost ? 'posted' : 'auto_posted', reviewed_by: req.user.id, reviewed_at: new Date() })
+              .update({ payable_id: payable.id, status: 'posted', reviewed_by: req.user.id, reviewed_at: new Date() })
               .eq('id', doc.id);
           }
         } else {
-          const value = confirmedValue ? parseFloat(confirmedValue) : docData.total_value;
+          const value = confirmedValue != null && confirmedValue !== ''
+            ? salesImporter.parseMoneyBr(confirmedValue)
+            : salesImporter.parseMoneyBr(docData.total_value);
           const gross = docData.subtotal != null
-            ? (parseFloat(docData.subtotal) || value)
+            ? (salesImporter.parseMoneyBr(docData.subtotal) || value)
             : (docData.total_value != null && docData.discount != null
-              ? (parseFloat(docData.total_value) + (parseFloat(docData.discount) || 0))
+              ? (salesImporter.parseMoneyBr(docData.total_value) + salesImporter.parseMoneyBr(docData.discount))
               : value);
-          const disc = docData.discount != null ? (parseFloat(docData.discount) || 0) : 0;
+          const disc = docData.discount != null ? salesImporter.parseMoneyBr(docData.discount) : 0;
           const singlePay = docData.payment_method
             ? salesImporter.normalizePayment(docData.payment_method)
             : null;
-          const { data: p } = await supabase
+          const { data: p, error: singleErr } = await supabase
             .from('payables')
             .insert({
               company_id:  req.companyId,
               category_id: resolvedCategoryId,
-              description: docType + ' — ' + supplier,
+              description: (docType + ' — ' + supplier).slice(0, 300),
               amount:      value,
               due_date:    due,
               origin:      'document',
@@ -224,10 +230,11 @@ router.post('/:companyId/upload',
               notes:       'Gemini: confianca ' + Math.round((docData.confidence || 0)*100) + '%',
             })
             .select('id').single();
+          if (singleErr) throw new Error('Erro ao criar lançamento: ' + singleErr.message);
           payable = p;
           if (p) {
             await supabase.from('client_documents')
-              .update({ payable_id: p.id, status: forcePost ? 'posted' : 'auto_posted', reviewed_by: req.user.id, reviewed_at: new Date() })
+              .update({ payable_id: p.id, status: 'posted', reviewed_by: req.user.id, reviewed_at: new Date() })
               .eq('id', doc.id);
           }
         }
@@ -241,11 +248,12 @@ router.post('/:companyId/upload',
         details: { docId: doc.id, value: docData.total_value, confidence: docData.confidence, auto_posted: shouldPost },
       });
 
+      const launchOk = !!(payable && payable.id);
       res.json({
         document: { id: doc.id, file_url: fileUrl },
         gemini:   docData,
         payable,
-        auto_posted: shouldPost,
+        auto_posted: shouldPost && launchOk,
       });
 
     } catch (err) {
@@ -442,7 +450,7 @@ router.post('/:companyId/:documentId/launch-items',
         .insert({
           company_id:       req.companyId,
           category_id:      itemCategoryId,
-          description:      docType + ' — ' + supplier + ' | ' + desc,
+          description:      (docType + ' — ' + supplier + ' | ' + desc).slice(0, 300),
           amount:           itemNet,
           due_date:         due,
           origin:           'document',
@@ -515,14 +523,17 @@ router.get('/:companyId',
       const { data: payLinks } = ids.length
         ? await supabase
           .from('payables')
-          .select('id, origin_id')
+          .select('id, origin_id, categories(name)')
           .eq('company_id', req.companyId)
           .eq('origin', 'document')
           .in('origin_id', ids)
         : { data: [] };
       const firstPayByDoc = {};
+      const firstCatByDoc = {};
       for (const p of payLinks || []) {
         if (!firstPayByDoc[p.origin_id]) firstPayByDoc[p.origin_id] = p.id;
+        const cn = p.categories?.name;
+        if (cn && firstCatByDoc[p.origin_id] == null) firstCatByDoc[p.origin_id] = cn;
       }
       const fixes = [];
       for (const d of docRows) {
@@ -551,6 +562,7 @@ router.get('/:companyId',
         const pid = firstPayByDoc[d.id];
         const st = String(d.status || '').toLowerCase();
         d.has_launch = postedLike(st) || !!pid;
+        d.payable_category_name = firstCatByDoc[d.id] || null;
       }
     }
 

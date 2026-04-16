@@ -183,7 +183,7 @@ class DriveMonitor {
       // Vincula ao documento
       await supabase
         .from('client_documents')
-        .update({ payable_id: payable.id, status: 'auto_posted' })
+        .update({ payable_id: payable.id, status: 'posted' })
         .eq('id', docId);
 
       logger.info(`Lançamento automático criado: R$ ${geminiData.total_value}`);
