@@ -18,6 +18,13 @@ const logRoutes       = require('./routes/logs');
 const { errorHandler } = require('./middlewares/errorHandler');
 const logger = require('./utils/logger');
 
+process.on('unhandledRejection', (reason) => {
+  logger.error('unhandledRejection', { reason: reason instanceof Error ? reason.message : String(reason) });
+});
+process.on('uncaughtException', (err) => {
+  logger.error('uncaughtException', { message: err.message, stack: err.stack });
+});
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -66,8 +73,13 @@ app.use((req, res) => res.status(404).json({ error: 'Rota não encontrada' }));
 // ── Error handler ──
 app.use(errorHandler);
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   logger.info(`🚀 Rocket ERP API rodando na porta ${PORT} [${process.env.NODE_ENV}]`);
 });
+
+/* Proxies (Railway, etc.): evita socket fechado em requests longos (ex.: Gemini + upload). */
+server.keepAliveTimeout = 75000;
+server.headersTimeout = 95000;
+server.timeout = 180000;
 
 module.exports = app;

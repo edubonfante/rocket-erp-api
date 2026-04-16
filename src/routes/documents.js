@@ -18,11 +18,49 @@ function coercePgDate(val) {
   return null;
 }
 
+/** Evita NaN/undefined no JSONB e valores que quebram o insert no Postgres. */
+function jsonSafeForPostgres(value) {
+  if (value == null) return null;
+  if (typeof value !== 'object') return value;
+  try {
+    return JSON.parse(JSON.stringify(value, (_, v) => {
+      if (v === undefined) return null;
+      if (typeof v === 'number' && !Number.isFinite(v)) return null;
+      return v;
+    }));
+  } catch {
+    return {};
+  }
+}
+
+function clamp01(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.min(1, Math.max(0, x));
+}
+
+/** Reduz JSONB gigante (raw_text/itens) — evita OOM e payloads que derrubam o Node em hosts pequenos (Railway). */
+function trimGeminiDocForPayload(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const o = { ...obj };
+  if (typeof o.raw_text === 'string' && o.raw_text.length > 45000) {
+    o.raw_text = `${o.raw_text.slice(0, 45000)}\n…[truncado — limite do servidor]`;
+  }
+  if (typeof o.observations === 'string' && o.observations.length > 4000) {
+    o.observations = o.observations.slice(0, 4000);
+  }
+  if (Array.isArray(o.items) && o.items.length > 250) {
+    o.items = o.items.slice(0, 250);
+  }
+  return o;
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+  /* Railway e similares: PDF+Gemini duplicam memória (buffer + base64); 15MB reduz risco de OOM. */
+  limits: { fileSize: 15 * 1024 * 1024 },
   fileFilter: (_, file, cb) => {
-    const ok = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'application/pdf'];
+    const ok = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'application/pdf'];
     cb(null, ok.includes(file.mimetype));
   }
 });
@@ -35,11 +73,18 @@ router.post('/:companyId/analyze',
   async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Imagem não enviada' });
 
-    const result = await gemini.readDocument(req.file.buffer, req.file.mimetype);
-    if (!result.success)
-      return res.status(422).json({ error: 'Não foi possível ler o documento', detail: result.error });
-
-    res.json(result.data);
+    try {
+      const result = await gemini.readDocument(req.file.buffer, req.file.mimetype);
+      if (!result.success) {
+        return res.status(422).json({ error: 'Não foi possível ler o documento', detail: result.error });
+      }
+      res.json(result.data);
+    } catch (err) {
+      logger.error('Document analyze error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message || 'Erro ao analisar documento' });
+      }
+    }
   }
 );
 
@@ -58,9 +103,20 @@ router.post('/:companyId/upload',
         try { userItems = JSON.parse(req.body.items); } catch(e) {}
       }
 
+    let storagePath = null;
     try {
-      // 1. Upload para Supabase Storage
-      const storagePath = `documents/${req.companyId}/${Date.now()}_${req.file.originalname}`;
+      // 1. Gemini primeiro (falha rápido; evita arquivo órfão no Storage se a leitura quebrar)
+      const geminiResult = await gemini.readDocument(req.file.buffer, req.file.mimetype);
+      if (!geminiResult.success) {
+        return res.status(422).json({
+          error: 'Erro ao analisar a imagem',
+          detail: geminiResult.error,
+        });
+      }
+      const docData = geminiResult.data;
+
+      // 2. Upload para Supabase Storage
+      storagePath = `documents/${req.companyId}/${Date.now()}_${req.file.originalname}`;
       const { error: uploadErr } = await supabase.storage
         .from('rocket-erp-docs')
         .upload(storagePath, req.file.buffer, { contentType: req.file.mimetype });
@@ -68,18 +124,16 @@ router.post('/:companyId/upload',
       if (uploadErr) throw new Error('Erro no upload: ' + uploadErr.message);
 
       const fileUrlPublic = supabase.storage.from('rocket-erp-docs').getPublicUrl(storagePath).data.publicUrl;
-      const fileUrlSigned = (await signRocketDocUrl(fileUrlPublic)) || fileUrlPublic;
 
-      // 2. Lê com Gemini
-      const geminiResult = await gemini.readDocument(req.file.buffer, req.file.mimetype);
-      if (!geminiResult.success) {
-        await supabase.storage.from('rocket-erp-docs').remove([storagePath]);
-        return res.status(422).json({
-          error: 'Erro ao analisar a imagem',
-          detail: geminiResult.error,
-        });
+      let fileUrlSigned = fileUrlPublic;
+      try {
+        const s = await signRocketDocUrl(fileUrlPublic);
+        if (s) fileUrlSigned = s;
+      } catch (signErr) {
+        logger.warn('Document upload: URL assinada indisponível, usando URL pública.', signErr.message);
       }
-      const docData = geminiResult.data;
+
+      const geminiPayload = jsonSafeForPostgres(trimGeminiDocForPayload(docData)) || {};
 
       // 3. Categorias da empresa (para casar nomes do Gemini com o plano de contas)
       const { data: uploadCatsRaw } = await supabase
@@ -107,18 +161,18 @@ router.post('/:companyId/upload',
           company_id:      req.companyId,
           client_user_id:  req.user.id,
           file_url:        fileUrlPublic,
-          file_name:       req.file.originalname,
-          doc_type:        docData.doc_type || 'outro',
+          file_name:       String(req.file.originalname || 'arquivo').slice(0, 200),
+          doc_type:        String(docData.doc_type || 'outro').slice(0, 50),
           detected_value:  detectedVal,
           detected_date:   detectedDate,
           confirmed_value: confirmedVal,
-          supplier_name:   docData.supplier_name,
-          supplier_cnpj:   docData.supplier_cnpj,
+          supplier_name:   docData.supplier_name != null ? String(docData.supplier_name).slice(0, 200) : null,
+          supplier_cnpj:   docData.supplier_cnpj != null ? String(docData.supplier_cnpj).slice(0, 18) : null,
           category_id:     categoryIdIfAllowed(resolvedCategoryId, uploadCats),
-          gemini_data:     docData,
-          confidence:      docData.confidence || 0,
+          gemini_data:     geminiPayload,
+          confidence:      clamp01(docData.confidence),
           status:          'pending',
-          notes:           req.body.notes || null,
+          notes:           req.body.notes != null ? String(req.body.notes).slice(0, 5000) : null,
         })
         .select('id').single();
 
@@ -127,7 +181,7 @@ router.post('/:companyId/upload',
       // 5. Cria lançamentos POR ITEM se forcePost ou confiança >= 0.85
       let payable = null;
       const totalValNum = salesImporter.parseMoneyBr(docData.total_value);
-      const shouldPost = forcePost === 'true' || (docData.confidence >= 0.85 && totalValNum > 0);
+      const shouldPost = forcePost === 'true' || (clamp01(docData.confidence) >= 0.85 && totalValNum > 0);
 
       if (shouldPost) {
         const items = (userItems && userItems.length > 0) ? userItems : (docData.items && docData.items.length > 0 ? docData.items : null);
@@ -263,7 +317,14 @@ router.post('/:companyId/upload',
 
     } catch (err) {
       logger.error('Document upload error:', err);
-      res.status(500).json({ error: err.message });
+      if (storagePath) {
+        supabase.storage.from('rocket-erp-docs').remove([storagePath]).catch((e) => {
+          logger.warn('Document upload: falha ao remover arquivo após erro:', e.message);
+        });
+      }
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message || 'Erro ao processar documento' });
+      }
     }
   }
 );
@@ -574,14 +635,15 @@ router.get('/:companyId',
       }
     }
 
-    await Promise.all(
-      (docRows || [])
-        .filter((d) => d.file_url)
-        .map(async (d) => {
-          const signed = await signRocketDocUrl(d.file_url);
-          if (signed) d.file_url = signed;
-        }),
-    );
+    for (const d of docRows || []) {
+      if (!d.file_url) continue;
+      try {
+        const signed = await signRocketDocUrl(d.file_url);
+        if (signed) d.file_url = signed;
+      } catch (e) {
+        logger.warn('GET documents: assinatura de file_url ignorada', d.id, e.message);
+      }
+    }
 
     res.json({ data: docRows, total: count });
   }

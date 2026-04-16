@@ -187,7 +187,8 @@ router.post('/:companyId/import',
           const ruleHint = descTrim.length >= 6 ? bankCategoryHint(t.description, t.amount) : null;
           if (ruleHint) {
             catId = matchCompanyCategoryId(catList, ruleHint, { preferTypes: pref });
-            if (catId) aiSuggestion = ruleHint;
+            /* Texto da sugestão sempre visível na coluna “Sugestão IA”, mesmo sem match no plano de contas */
+            aiSuggestion = ruleHint;
           }
 
           let suggestion = { category: null, confidence: 0 };
@@ -200,12 +201,11 @@ router.post('/:companyId/import',
             const conf = Number(suggestion.confidence) || 0;
             const rawCat = suggestion.category;
             const catStr = rawCat != null && String(rawCat).trim().toLowerCase() !== 'null' ? String(rawCat).trim() : '';
-            if (catStr && conf >= 0.58) {
+            /* Mostra rótulo da IA a partir de confiança moderada; só grava category_id se houver match */
+            if (catStr && conf >= 0.45) {
+              aiSuggestion = catStr;
               const matched = matchCompanyCategoryId(catList, catStr, { preferTypes: pref });
-              if (matched) {
-                aiSuggestion = catStr;
-                catId = matched;
-              }
+              if (matched) catId = matched;
             }
           }
 

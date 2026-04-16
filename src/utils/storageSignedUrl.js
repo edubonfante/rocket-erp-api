@@ -5,7 +5,12 @@ function rocketErpDocsPathFromUrl(fileUrl) {
   if (!fileUrl || typeof fileUrl !== 'string') return null;
   const m = fileUrl.match(/\/rocket-erp-docs\/(.+)$/i);
   if (!m) return null;
-  return decodeURIComponent(m[1].split('?')[0]);
+  const raw = m[1].split('?')[0];
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 /**
@@ -14,11 +19,15 @@ function rocketErpDocsPathFromUrl(fileUrl) {
  * @param {number} expiresIn segundos (padrão 7 dias)
  */
 async function signRocketDocUrl(fileUrl, expiresIn = 60 * 60 * 24 * 7) {
-  const path = rocketErpDocsPathFromUrl(fileUrl);
-  if (!path) return null;
-  const { data, error } = await supabase.storage.from('rocket-erp-docs').createSignedUrl(path, expiresIn);
-  if (error || !data?.signedUrl) return null;
-  return data.signedUrl;
+  try {
+    const path = rocketErpDocsPathFromUrl(fileUrl);
+    if (!path) return null;
+    const { data, error } = await supabase.storage.from('rocket-erp-docs').createSignedUrl(path, expiresIn);
+    if (error || !data?.signedUrl) return null;
+    return data.signedUrl;
+  } catch (e) {
+    return null;
+  }
 }
 
 module.exports = { rocketErpDocsPathFromUrl, signRocketDocUrl };

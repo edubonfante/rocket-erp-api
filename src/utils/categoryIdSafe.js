@@ -16,7 +16,8 @@ function cleanCategoryId(v) {
 function categoryIdIfAllowed(id, catList) {
   const c = cleanCategoryId(id);
   if (!c || !Array.isArray(catList) || !catList.length) return null;
-  return catList.some((row) => row.id === c) ? c : null;
+  const cl = c.toLowerCase();
+  return catList.some((row) => row && String(row.id).toLowerCase() === cl) ? c : null;
 }
 
 module.exports = { cleanCategoryId, categoryIdIfAllowed, UUID_RE };
