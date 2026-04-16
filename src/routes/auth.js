@@ -8,14 +8,16 @@ const logger = require('../utils/logger');
 
 // POST /api/auth/login
 router.post('/login', [
-  body('email').isEmail().normalizeEmail(),
+  // Não usar normalizeEmail(): altera endereços (ex. Gmail) e quebra .eq com o valor gravado no cadastro.
+  body('email').trim().isEmail(),
   body('password').isLength({ min: 6 }),
 ], async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty())
     return res.status(400).json({ errors: errors.array() });
 
-  const { email, password } = req.body;
+  const email = String(req.body.email || '').trim();
+  const { password } = req.body;
 
   try {
     const { data: user, error } = await supabase
