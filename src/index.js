@@ -28,10 +28,36 @@ process.on('uncaughtException', (err) => {
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+/* Atrás de Firebase Hosting / Cloud Run / Railway o IP visto é o do proxy — necessário p/ rate-limit e logs. */
+app.set('trust proxy', 1);
+
 // ── Segurança ──
 app.use(helmet());
+
+const DEFAULT_CORS = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'http://127.0.0.1:5173',
+  /* Site do firebase.json (ajuste se mudar o projeto Firebase) */
+  'https://rocketrocket-64c29.web.app',
+  'https://rocketrocket-64c29.firebaseapp.com',
+];
+
+function corsOriginList() {
+  const extra = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return [...new Set([...DEFAULT_CORS, ...extra])];
+}
+
 app.use(cors({
-  origin: (process.env.ALLOWED_ORIGINS || 'http://localhost:5173').split(','),
+  origin(origin, cb) {
+    const allowed = corsOriginList();
+    if (!origin) return cb(null, true);
+    if (allowed.includes(origin)) return cb(null, true);
+    return cb(null, false);
+  },
   credentials: true,
 }));
 
