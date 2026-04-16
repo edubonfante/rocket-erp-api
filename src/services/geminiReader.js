@@ -57,10 +57,29 @@ Estrutura obrigatória do JSON:
 }
 
 Categorias disponíveis para o campo "category" de cada item:
-Bovinos, Aves, Suinos, Peixes, Embutidos, Laticinios, Hortifruti, Padaria,
-Secos, Massas Molhos Temperos, Oleos Azeites, Cafe Sobremesas,
-Cervejas, Destilados, Agua Refrigerantes, Energeticos,
-Embalagens Descartaveis, Gelo, Congelados, Outros.
+- Bovinos (carnes bovinas, boi, frango nao, apenas bovinos)
+- Aves (frango, peru, pato, chester)
+- Suinos (porco, bacon, linguica suina)
+- Peixes (peixe, frutos do mar, camarao)
+- Embutidos (salsicha, presunto, salame, mortadela, linguica)
+- Laticinios (leite, queijo, iogurte, manteiga, creme de leite)
+- Hortifruti (frutas, verduras, legumes, ovos)
+- Padaria (pao, bolo, biscoito, farinha, achocolatado)
+- Secos (arroz, feijao, acucar, sal, farinha, graos)
+- Massas Molhos Temperos (macarrao, molho, ketchup, mostarda, tempero, azeite vinagre)
+- Oleos Azeites (oleo de soja, azeite, vinagre)
+- Cafe Sobremesas (cafe, cha, achocolatado, sorvete, chocolate)
+- Cervejas (cerveja, chope)
+- Destilados (vodka, whisky, cachaca, vinho, espumante)
+- Agua Refrigerantes (agua, refrigerante, suco industrializado)
+- Energeticos (red bull, monster, energetico)
+- Embalagens Descartaveis (copo descartavel, prato descartavel, sacola, papel aluminio, plastico)
+- Gelo (gelo)
+- Congelados (produto congelado, pizza, lasanha)
+- Higiene Limpeza (sabao, detergente, desinfetante, alcool, papel higienico, produto de limpeza, vassoura, esponja, alvejante, multiuso)
+- Outros (demais itens nao classificados acima)
+
+IMPORTANTE: Alcool de limpeza = Higiene Limpeza. Papel higienico = Higiene Limpeza. Detergente = Higiene Limpeza.
 
 Seja preciso. Se não tiver certeza de um campo, use null.`;
 
