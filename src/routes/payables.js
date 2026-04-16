@@ -117,7 +117,7 @@ router.delete('/:companyId/:id', authenticate, requireCompanyAccess, requirePerm
 function applyPayableListFilters(q, req) {
   const {
     search = '', status = '', category_id = '', supplier = '', date_from = '', date_to = '',
-    origin = '', payment = '', item = '', desc = '',
+    origin = '', payment = '', item = '', desc = '', document_id = '',
   } = req.query;
   if (search) {
     q = q.or(
@@ -133,6 +133,7 @@ function applyPayableListFilters(q, req) {
   if (payment) q = q.ilike('payment_method', `%${payment}%`);
   if (item) q = q.ilike('item_description', `%${item}%`);
   if (desc) q = q.ilike('description', `%${desc}%`);
+  if (document_id) q = q.eq('origin', 'document').eq('origin_id', document_id);
   return q;
 }
 

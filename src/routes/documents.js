@@ -6,6 +6,15 @@ const salesImporter = require('../services/salesImporter');
 const { authenticate, requireCompanyAccess, requirePermission } = require('../middlewares/auth');
 const logger  = require('../utils/logger');
 
+function coercePgDate(val) {
+  if (!val) return null;
+  if (val instanceof Date && !Number.isNaN(val.getTime())) return val.toISOString().slice(0, 10);
+  const s = String(val).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  if (/^\d{2}\/\d{2}\/\d{4}/.test(s)) return `${s.slice(6, 10)}-${s.slice(3, 5)}-${s.slice(0, 2)}`;
+  return null;
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
@@ -81,6 +90,12 @@ router.post('/:companyId/upload',
       }
 
       // 4. Insere documento
+      const detectedVal = salesImporter.parseMoneyBr(docData.total_value);
+      const confirmedVal = confirmedValue != null && confirmedValue !== ''
+        ? salesImporter.parseMoneyBr(confirmedValue)
+        : detectedVal;
+      const detectedDate = coercePgDate(docData.issue_date) || coercePgDate(docData.due_date) || new Date().toISOString().split('T')[0];
+
       const { data: doc, error: docErr } = await supabase
         .from('client_documents')
         .insert({
@@ -89,9 +104,9 @@ router.post('/:companyId/upload',
           file_url:        fileUrl,
           file_name:       req.file.originalname,
           doc_type:        docData.doc_type || 'outro',
-          detected_value:  docData.total_value,
-          detected_date:   docData.issue_date,
-          confirmed_value: confirmedValue ? parseFloat(confirmedValue) : docData.total_value,
+          detected_value:  detectedVal,
+          detected_date:   detectedDate,
+          confirmed_value: confirmedVal,
           supplier_name:   docData.supplier_name,
           supplier_cnpj:   docData.supplier_cnpj,
           category_id:     resolvedCategoryId,
@@ -232,6 +247,86 @@ router.post('/:companyId/upload',
       logger.error('Document upload error:', err);
       res.status(500).json({ error: err.message });
     }
+  }
+);
+
+// GET /api/documents/:companyId/:documentId/payables — títulos gerados a partir do documento
+router.get('/:companyId/:documentId/payables',
+  authenticate, requireCompanyAccess, requirePermission('docs'),
+  async (req, res) => {
+    const { documentId } = req.params;
+    const { data: doc, error: dErr } = await supabase
+      .from('client_documents')
+      .select('id,status,file_name,supplier_name,detected_value')
+      .eq('id', documentId)
+      .eq('company_id', req.companyId)
+      .single();
+    if (dErr || !doc) return res.status(404).json({ error: 'Documento não encontrado' });
+
+    const { data: rows, error } = await supabase
+      .from('payables')
+      .select('*, category:categories(id,name)')
+      .eq('company_id', req.companyId)
+      .eq('origin', 'document')
+      .eq('origin_id', documentId)
+      .order('due_date', { ascending: true });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ document: doc, payables: rows || [] });
+  }
+);
+
+// POST /api/documents/:companyId/:documentId/revert-launch — cancela títulos em aberto e reabre o documento
+router.post('/:companyId/:documentId/revert-launch',
+  authenticate, requireCompanyAccess, requirePermission('docs'),
+  async (req, res) => {
+    const { documentId } = req.params;
+    const { data: doc, error: dErr } = await supabase
+      .from('client_documents')
+      .select('id,status,payable_id')
+      .eq('id', documentId)
+      .eq('company_id', req.companyId)
+      .single();
+    if (dErr || !doc) return res.status(404).json({ error: 'Documento não encontrado' });
+
+    const { data: pays, error: pErr } = await supabase
+      .from('payables')
+      .select('id,status')
+      .eq('company_id', req.companyId)
+      .eq('origin', 'document')
+      .eq('origin_id', documentId);
+    if (pErr) return res.status(500).json({ error: pErr.message });
+    if (!pays?.length) return res.status(400).json({ error: 'Nenhum lançamento vinculado a este documento' });
+
+    const paid = pays.filter((p) => p.status === 'paid');
+    if (paid.length) {
+      return res.status(400).json({
+        error: 'Existe título já marcado como pago. Ajuste em Contas a Pagar antes de estornar o vínculo do documento.',
+      });
+    }
+
+    const ids = pays.map((p) => p.id);
+    await supabase.from('payables').update({ status: 'cancelled' }).in('id', ids).eq('company_id', req.companyId);
+
+    await supabase
+      .from('client_documents')
+      .update({
+        status: 'pending',
+        payable_id: null,
+        reviewed_by: null,
+        reviewed_at: null,
+      })
+      .eq('id', documentId)
+      .eq('company_id', req.companyId);
+
+    await supabase.from('access_logs').insert({
+      user_id: req.user.id,
+      company_id: req.companyId,
+      action: `Estorno de lançamentos do documento ${documentId} (${ids.length} títulos)`,
+      module: 'docs',
+      details: { documentId, payableIds: ids },
+    });
+
+    res.json({ message: `${ids.length} título(s) cancelado(s). Documento reaberto para novo lançamento.` });
   }
 );
 
