@@ -1,6 +1,7 @@
 const { google } = require('googleapis');
 const supabase   = require('../db');
 const gemini     = require('./geminiReader');
+const salesImporter = require('./salesImporter');
 const logger     = require('../utils/logger');
 
 /**
@@ -160,6 +161,9 @@ class DriveMonitor {
    */
   async autoCreatePayable(docId, companyId, geminiData, categoryId) {
     try {
+      const pm = geminiData.payment_method
+        ? salesImporter.normalizePayment(geminiData.payment_method)
+        : null;
       const { data: payable } = await supabase
         .from('payables')
         .insert({
@@ -171,6 +175,7 @@ class DriveMonitor {
           origin:      'document',
           origin_id:   docId,
           status:      'open',
+          payment_method: pm,
           notes:       `Lançamento automático via Gemini (confiança: ${Math.round(geminiData.confidence * 100)}%)`,
         })
         .select('id').single();

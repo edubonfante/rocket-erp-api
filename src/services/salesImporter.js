@@ -1,6 +1,7 @@
 const { parse: csvParse } = require('csv-parse/sync');
 const xlsx   = require('xlsx');
 const xml2js = require('xml2js');
+const gemini = require('./geminiReader');
 
 /**
  * Detecta e parseia qualquer arquivo de vendas.
@@ -10,18 +11,69 @@ const xml2js = require('xml2js');
 
 class SalesImporter {
 
+  /** Aceita número JSON, "123.45", "1.234,56", "R$ 10,50" */
+  parseMoneyBr(val) {
+    if (val == null || val === '') return 0;
+    if (typeof val === 'number' && !Number.isNaN(val)) return val;
+    const s = String(val).trim().replace(/[R$\s]/gi, '');
+    if (!s) return 0;
+    const hasComma = s.includes(',');
+    const hasDot = s.includes('.');
+    let norm = s;
+    if (hasComma && hasDot) {
+      if (s.lastIndexOf(',') > s.lastIndexOf('.')) norm = s.replace(/\./g, '').replace(',', '.');
+      else norm = s.replace(/,/g, '');
+    } else if (hasComma) norm = s.replace(/\./g, '').replace(',', '.');
+    const n = parseFloat(norm);
+    return Number.isFinite(n) ? n : 0;
+  }
+
   async parse(buffer, filename, mimetype) {
     const ext = filename.split('.').pop().toLowerCase();
 
     let rows = [];
+    const isImageSale = ['jpg','jpeg','png','webp','pdf'].includes(ext);
     if (['csv', 'txt'].includes(ext))          rows = this.parseCSV(buffer);
     else if (['xlsx', 'xls'].includes(ext))    rows = this.parseExcel(buffer);
     else if (ext === 'json')                   rows = this.parseJSON(buffer);
     else if (ext === 'xml')                    rows = await this.parseXML(buffer);
     else if (ext === 'ofx')                    rows = this.parseOFX(buffer.toString());
-    else throw new Error(`Formato não suportado: ${ext}`);
+    else if (isImageSale) {
+      const result = await gemini.readDocument(buffer, mimetype || 'image/jpeg');
+      if (!result.success) throw new Error(`Erro ao analisar a imagem: ${result.error}`);
+      rows = [this.fromGeminiDoc(result.data)];
+    } else throw new Error(`Formato não suportado: ${ext}`);
 
-    return this.normalize(rows);
+    const normalized = this.normalize(rows);
+    if (isImageSale && normalized.length === 0) {
+      throw new Error(
+        'Nenhuma venda detectada no documento (valor total zerado ou em formato não reconhecido). Confira se a foto está legível.'
+      );
+    }
+    return normalized;
+  }
+
+  fromGeminiDoc(doc) {
+    const num = (v) => this.parseMoneyBr(v);
+    const today = new Date().toISOString().split('T')[0];
+    const issue = doc.issue_date || doc.due_date || today;
+    const total = num(doc.total_value);
+    const discount = num(doc.discount);
+    const gross = doc.subtotal != null ? num(doc.subtotal) : (discount ? total + discount : total);
+    const net = total || Math.max(gross - discount, 0);
+    const qty = Array.isArray(doc.items) && doc.items.length
+      ? doc.items.reduce((s, it) => s + (parseFloat(it.quantity) || 1), 0)
+      : 1;
+    return {
+      sale_date: issue,
+      gross_value: gross,
+      discount: discount,
+      net_value: net,
+      payment_method: doc.payment_method || null,
+      quantity: qty,
+      cancelled: false,
+      raw_data: doc,
+    };
   }
 
   parseCSV(buffer) {
@@ -38,8 +90,19 @@ class SalesImporter {
 
   parseExcel(buffer) {
     const workbook = xlsx.read(buffer, { type: 'buffer', cellDates: true });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    return xlsx.utils.sheet_to_json(sheet, { defval: null });
+    const rows = [];
+    for (const sheetName of workbook.SheetNames) {
+      const sheet = workbook.Sheets[sheetName];
+      if (!sheet) continue;
+      const json = xlsx.utils.sheet_to_json(sheet, { defval: null });
+      for (const r of json) {
+        if (r == null || typeof r !== 'object') continue;
+        const empty = Object.keys(r).every(k => r[k] == null || String(r[k]).trim() === '');
+        if (empty) continue;
+        rows.push({ ...r, __sheet: sheetName });
+      }
+    }
+    return rows;
   }
 
   parseJSON(buffer) {
@@ -91,32 +154,31 @@ class SalesImporter {
     return transactions;
   }
 
+  normalizePayment(val) {
+    if (!val) return 'outros';
+    const v = String(val).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    if (v.includes('pix')) return 'pix';
+    if (v.includes('dinheiro') || v.includes('cash')) return 'dinheiro';
+    if (v.includes('credito') || v.includes('credit')) return 'credito';
+    if (v.includes('debito') || v.includes('debit')) return 'debito';
+    if (v.includes('voucher') || v.includes('vale')) return 'voucher';
+    if (v.includes('boleto')) return 'boleto';
+    if (v.includes('transferencia') || v.includes('ted') || v.includes('doc')) return 'transferencia';
+    if (v.includes('cupom') || v.includes('coupon')) return 'cupom';
+    return String(val).toLowerCase().slice(0, 30);
+  }
+
   /**
    * Normaliza qualquer array de objetos para o schema padrão de vendas.
-   * Detecta campos por similaridade de nome.
+   * Detecta campos por similaridade de nome (por linha — suporta várias abas Excel com colunas diferentes).
    */
   normalize(rows) {
     if (!rows.length) return [];
 
-    const keys = Object.keys(rows[0]);
-    const find = (...candidates) =>
-      keys.find(k => candidates.some(c => k.toLowerCase().replace(/[^a-z]/g,'').includes(c)));
-
-    // Mapeamento inteligente de campos
-    const fieldMap = {
-      date:          find('data','date','dt','dia','fecha'),
-      gross:         find('bruto','gross','valor','total','venda','receita','amount'),
-      discount:      find('desconto','discount','abatimento'),
-      net:           find('liquido','liquid','net','final','recebido'),
-      payment:       find('forma','pagamento','payment','tipo','modalidade','meio'),
-      quantity:      find('qtd','quantidade','qty','quantity','itens'),
-      cancelled:     find('cancelado','cancel','devolvido','estorno','status'),
-    };
-
     const parseNum = (val) => {
       if (!val && val !== 0) return 0;
       return parseFloat(
-        String(val).replace(/[R$\s]/g,'').replace('.','').replace(',','.')
+        String(val).replace(/[R$\s]/g, '').replace('.', '').replace(',', '.')
       ) || 0;
     };
 
@@ -124,28 +186,12 @@ class SalesImporter {
       if (!val) return null;
       if (val instanceof Date) return val.toISOString().split('T')[0];
       const s = String(val).trim();
-      // DD/MM/YYYY
       if (/^\d{2}\/\d{2}\/\d{4}/.test(s))
-        return `${s.slice(6,10)}-${s.slice(3,5)}-${s.slice(0,2)}`;
-      // YYYY-MM-DD
-      if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0,10);
-      // YYYYMMDD
+        return `${s.slice(6, 10)}-${s.slice(3, 5)}-${s.slice(0, 2)}`;
+      if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
       if (/^\d{8}$/.test(s))
-        return `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`;
+        return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
       return s;
-    };
-
-    const normalizePayment = (val) => {
-      if (!val) return 'outros';
-      const v = String(val).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-      if (v.includes('pix'))                    return 'pix';
-      if (v.includes('dinheiro')||v.includes('cash')) return 'dinheiro';
-      if (v.includes('credito')||v.includes('credit')) return 'credito';
-      if (v.includes('debito')||v.includes('debit'))   return 'debito';
-      if (v.includes('voucher')||v.includes('vale'))   return 'voucher';
-      if (v.includes('boleto'))                 return 'boleto';
-      if (v.includes('transferencia')||v.includes('ted')||v.includes('doc')) return 'transferencia';
-      return String(val).toLowerCase().slice(0,30);
     };
 
     const isCancelled = (val) => {
@@ -154,24 +200,42 @@ class SalesImporter {
       return v === '1' || v === 'true' || v === 's' || v === 'sim' || v.includes('cancel') || v.includes('estorn');
     };
 
-    return rows.map(row => {
-      const gross   = parseNum(fieldMap.gross   ? row[fieldMap.gross]   : 0);
+    const fieldMapForRow = (row) => {
+      const keys = Object.keys(row).filter((k) => !String(k).startsWith('__'));
+      const find = (...candidates) =>
+        keys.find((k) => candidates.some((c) => k.toLowerCase().replace(/[^a-z0-9]/g, '').includes(c)));
+      return {
+        date: find('data', 'date', 'dt', 'dia', 'fecha'),
+        gross: find('bruto', 'gross', 'valor', 'total', 'venda', 'receita', 'amount'),
+        discount: find('desconto', 'discount', 'abatimento'),
+        net: find('liquido', 'liquid', 'net', 'final', 'recebido'),
+        payment: find('forma', 'pagamento', 'payment', 'tipo', 'modalidade', 'meio', 'bandeira'),
+        quantity: find('qtd', 'quantidade', 'qty', 'quantity', 'itens'),
+        cancelled: find('cancelado', 'cancel', 'devolvido', 'estorno', 'status'),
+      };
+    };
+
+    const today = new Date().toISOString().split('T')[0];
+    return rows.map((row) => {
+      const fieldMap = fieldMapForRow(row);
+      const gross = parseNum(fieldMap.gross ? row[fieldMap.gross] : 0);
       const discount = parseNum(fieldMap.discount ? row[fieldMap.discount] : 0);
-      const net     = fieldMap.net
+      const net = fieldMap.net
         ? parseNum(row[fieldMap.net])
         : gross - discount;
+      const saleDate = parseDate(fieldMap.date ? row[fieldMap.date] : null) || today;
 
       return {
-        sale_date:      parseDate(fieldMap.date ? row[fieldMap.date] : null),
-        gross_value:    gross,
-        discount:       discount,
-        net_value:      net || gross,
-        payment_method: normalizePayment(fieldMap.payment ? row[fieldMap.payment] : null),
-        quantity:       parseInt(fieldMap.quantity ? row[fieldMap.quantity] : 1) || 1,
-        cancelled:      isCancelled(fieldMap.cancelled ? row[fieldMap.cancelled] : false),
-        raw_data:       row,
+        sale_date: saleDate,
+        gross_value: gross,
+        discount,
+        net_value: net || gross,
+        payment_method: this.normalizePayment(fieldMap.payment ? row[fieldMap.payment] : null),
+        quantity: parseInt(fieldMap.quantity ? row[fieldMap.quantity] : 1, 10) || 1,
+        cancelled: isCancelled(fieldMap.cancelled ? row[fieldMap.cancelled] : false),
+        raw_data: row,
       };
-    }).filter(r => r.gross_value > 0 || r.net_value > 0);
+    }).filter((r) => r.gross_value > 0 || r.net_value > 0);
   }
 
   summary(rows) {
