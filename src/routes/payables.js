@@ -169,7 +169,7 @@ router.get('/:companyId/query', authenticate, requireCompanyAccess, async (req, 
 
     let query = supabase
       .from('payables')
-      .select('*, category:categories(id,name)', { count: 'exact' })
+      .select('*, categories(id,name)', { count: 'exact' })
       .eq('company_id', req.companyId);
     query = applyPayableListFilters(query, req);
     query = query.order(orderCol, { ascending: sortAsc }).order('id', { ascending: false }).range(offset, offset + perPage - 1);

@@ -160,6 +160,42 @@ Responda SOMENTE com JSON válido, sem markdown.
    * Sugere categoria para um lançamento baseado na descrição e histórico.
    * Útil para a conciliação bancária.
    */
+  /**
+   * Interpreta trecho de planilha/CSV de vendas e devolve linhas normalizadas.
+   * Usado quando o parser heurístico não encontra colunas de data/valor.
+   */
+  async readSalesSnippet(filename, sheetLabel, textSnippet) {
+    const snippet = String(textSnippet || '').slice(0, 14000);
+    const prompt = `Você interpreta exportações de vendas de PDV/ERP brasileiros.
+Arquivo: ${filename}
+Planilha/bloco: ${sheetLabel}
+
+Trecho (cabeçalho + linhas; pode ser TAB ou vírgula):
+${snippet}
+
+Tarefa: identificar cada LINHA DE VENDA individual (ignore linhas só de total, subtotal, taxa, cabeçalho repetido).
+Responda SOMENTE com JSON válido, sem markdown:
+{"sales":[{"sale_date":"YYYY-MM-DD","gross_value":0,"discount":0,"net_value":0,"payment_method":"pix|dinheiro|credito|debito|boleto|transferencia|voucher|cupom|outros|null","quantity":1,"cancelled":false}]}
+
+Regras:
+- Valores são números decimais sem "R$" ou texto.
+- Se só existir um valor por linha, coloque em net_value e gross_value igual.
+- payment_method: normalize para os valores listados; se desconhecido use "outros".
+- cancelled true se a linha indicar cancelamento/estorno.
+- Se não houver vendas: {"sales":[]}.`;
+
+    try {
+      const result = await this.model.generateContent(prompt);
+      const text = result.response.text().replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      const data = JSON.parse(text);
+      if (!data || !Array.isArray(data.sales)) return { success: false, error: 'Resposta sem array sales', data: null };
+      return { success: true, data };
+    } catch (err) {
+      logger.error('Gemini readSalesSnippet error:', err.message);
+      return { success: false, error: err.message, data: null };
+    }
+  }
+
   async suggestCategory(description, amount, availableCategories, history = []) {
     const prompt = `Você é um contador brasileiro especialista em classificação contábil.
 Classifique o lançamento abaixo em uma das categorias disponíveis.

@@ -24,6 +24,11 @@ router.post('/:companyId/preview',
 
     try {
       const rows = await importer.parse(req.file.buffer, req.file.originalname, req.file.mimetype);
+      if (!rows.length) {
+        return res.status(422).json({
+          error: 'Nenhuma linha de venda reconhecida. Confira se há colunas de data e valor; em planilhas não padrão o sistema tenta interpretar com Gemini quando há GEMINI_API_KEY.',
+        });
+      }
       const summary = importer.summary(rows);
       const excelSheets = [...new Set(
         rows.map((r) => (r.raw_data && r.raw_data.__sheet) || null).filter(Boolean)

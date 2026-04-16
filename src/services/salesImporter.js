@@ -2,6 +2,7 @@ const { parse: csvParse } = require('csv-parse/sync');
 const xlsx   = require('xlsx');
 const xml2js = require('xml2js');
 const gemini = require('./geminiReader');
+const logger = require('../utils/logger');
 
 /**
  * Detecta e parseia qualquer arquivo de vendas.
@@ -45,12 +46,51 @@ class SalesImporter {
     } else throw new Error(`Formato não suportado: ${ext}`);
 
     const normalized = this.normalize(rows);
+    const isExcelOrCsv = ['csv', 'txt', 'xlsx', 'xls'].includes(ext);
+    if (normalized.length === 0 && isExcelOrCsv && process.env.GEMINI_API_KEY) {
+      try {
+        const gRows = await this.parseWithGemini(buffer, filename);
+        const gNorm = this.normalize(gRows);
+        if (gNorm.length) return gNorm;
+      } catch (e) {
+        logger.warn('Gemini vendas (fallback):', e.message);
+      }
+    }
     if (isImageSale && normalized.length === 0) {
       throw new Error(
         'Nenhuma venda detectada no documento (valor total zerado ou em formato não reconhecido). Confira se a foto está legível.'
       );
     }
     return normalized;
+  }
+
+  /**
+   * Quando CSV/Excel não casa com colunas heurísticas, envia um trecho ao Gemini.
+   */
+  async parseWithGemini(buffer, filename) {
+    const ext = filename.split('.').pop().toLowerCase();
+    if (['csv', 'txt'].includes(ext)) {
+      const text = buffer.toString('utf-8');
+      const head = text.slice(0, 14000);
+      if (!head.trim()) return [];
+      const result = await gemini.readSalesSnippet(filename, 'CSV', head);
+      if (!result.success) throw new Error(result.error || 'Gemini não interpretou o arquivo');
+      const arr = Array.isArray(result.data?.sales) ? result.data.sales : [];
+      return arr.map((r) => ({ ...r, __gemini: true, __sheet: 'CSV' }));
+    }
+    if (['xlsx', 'xls'].includes(ext)) {
+      const workbook = xlsx.read(buffer, { type: 'buffer', cellDates: true });
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      if (!sheet) return [];
+      const tsv = xlsx.utils.sheet_to_csv(sheet, { FS: '\t' });
+      const head = tsv.split('\n').slice(0, 80).join('\n');
+      const result = await gemini.readSalesSnippet(filename, sheetName || 'Plan1', head);
+      if (!result.success) throw new Error(result.error || 'Gemini não interpretou a planilha');
+      const arr = Array.isArray(result.data?.sales) ? result.data.sales : [];
+      return arr.map((r) => ({ ...r, __gemini: true, __sheet: sheetName }));
+    }
+    return [];
   }
 
   fromGeminiDoc(doc) {
@@ -175,12 +215,7 @@ class SalesImporter {
   normalize(rows) {
     if (!rows.length) return [];
 
-    const parseNum = (val) => {
-      if (!val && val !== 0) return 0;
-      return parseFloat(
-        String(val).replace(/[R$\s]/g, '').replace('.', '').replace(',', '.')
-      ) || 0;
-    };
+    const parseNum = (val) => this.parseMoneyBr(val);
 
     const parseDate = (val) => {
       if (!val) return null;

@@ -5,6 +5,7 @@ const gemini  = require('../services/geminiReader');
 const salesImporter = require('../services/salesImporter');
 const { authenticate, requireCompanyAccess, requirePermission } = require('../middlewares/auth');
 const logger  = require('../utils/logger');
+const { matchCompanyCategoryId } = require('../utils/categoryMatch');
 
 function coercePgDate(val) {
   if (!val) return null;
@@ -77,16 +78,17 @@ router.post('/:companyId/upload',
       }
       const docData = geminiResult.data;
 
-      // 3. Resolve categoria
+      // 3. Categorias da empresa (para casar nomes do Gemini com o plano de contas)
+      const { data: uploadCatsRaw } = await supabase
+        .from('categories')
+        .select('id,name,type,company_id')
+        .or(`company_id.eq.${req.companyId},company_id.is.null`)
+        .eq('active', true);
+      const uploadCats = uploadCatsRaw || [];
+
       let resolvedCategoryId = categoryId;
       if (!resolvedCategoryId && docData.suggested_category) {
-        const { data: cat } = await supabase
-          .from('categories')
-          .select('id')
-          .eq('company_id', req.companyId)
-          .ilike('name', `%${docData.suggested_category}%`)
-          .single();
-        resolvedCategoryId = cat?.id;
+        resolvedCategoryId = matchCompanyCategoryId(uploadCats, docData.suggested_category, { preferTypes: ['despesa', 'ambos'] });
       }
 
       // 4. Insere documento
@@ -146,13 +148,8 @@ router.post('/:companyId/upload',
           for (const item of items) {
             let itemCategoryId = resolvedCategoryId;
             if (item.category) {
-              const { data: catData } = await supabase
-                .from('categories')
-                .select('id')
-                .eq('company_id', req.companyId)
-                .ilike('name', '%' + item.category + '%')
-                .limit(1);
-              if (catData?.[0]?.id) itemCategoryId = catData[0].id;
+              const mid = matchCompanyCategoryId(uploadCats, String(item.category), { preferTypes: ['despesa', 'ambos'] });
+              if (mid) itemCategoryId = mid;
             }
             const itemGross = salesImporter.parseMoneyBr(item.total ?? (salesImporter.parseMoneyBr(item.unit_price) * (item.quantity || 1)));
             const itemDiscount = allocDiscount(itemGross);
@@ -265,7 +262,7 @@ router.get('/:companyId/:documentId/payables',
 
     const { data: rows, error } = await supabase
       .from('payables')
-      .select('*, category:categories(id,name)')
+      .select('*, categories(id,name)')
       .eq('company_id', req.companyId)
       .eq('origin', 'document')
       .eq('origin_id', documentId)
@@ -358,6 +355,13 @@ router.post('/:companyId/:documentId/launch-items',
       return res.status(400).json({ error: 'Documento já lançado' });
     }
 
+    const { data: companyCatsRaw } = await supabase
+      .from('categories')
+      .select('id,name,type,company_id')
+      .or(`company_id.eq.${req.companyId},company_id.is.null`)
+      .eq('active', true);
+    const companyCats = companyCatsRaw || [];
+
     const { data: existingPay } = await supabase
       .from('payables')
       .select('id')
@@ -381,13 +385,7 @@ router.post('/:companyId/:documentId/launch-items',
     const docData = doc.gemini_data || {};
     let resolvedCategoryId = categoryId || doc.category_id;
     if (!resolvedCategoryId && docData.suggested_category) {
-      const { data: cat } = await supabase
-        .from('categories')
-        .select('id')
-        .eq('company_id', req.companyId)
-        .ilike('name', `%${docData.suggested_category}%`)
-        .single();
-      resolvedCategoryId = cat?.id;
+      resolvedCategoryId = matchCompanyCategoryId(companyCats, docData.suggested_category, { preferTypes: ['despesa', 'ambos'] });
     }
 
     const due = confirmedDate || docData.due_date || docData.issue_date || new Date().toISOString().split('T')[0];
@@ -409,13 +407,8 @@ router.post('/:companyId/:documentId/launch-items',
       let itemCategoryId = resolvedCategoryId;
       const catName = item.category || item.catName;
       if (catName) {
-        const { data: catData } = await supabase
-          .from('categories')
-          .select('id')
-          .eq('company_id', req.companyId)
-          .ilike('name', '%' + String(catName) + '%')
-          .limit(1);
-        if (catData?.[0]?.id) itemCategoryId = catData[0].id;
+        const mid = matchCompanyCategoryId(companyCats, String(catName), { preferTypes: ['despesa', 'ambos'] });
+        if (mid) itemCategoryId = mid;
       }
       if (item.category_id) itemCategoryId = item.category_id;
 
