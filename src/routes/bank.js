@@ -7,8 +7,19 @@ const { authenticate, requireCompanyAccess, requirePermission } = require('../mi
 const logger = require('../utils/logger');
 const { matchCompanyCategoryId } = require('../utils/categoryMatch');
 const { bankCategoryHint } = require('../utils/bankCategoryHints');
+const { categoryIdIfAllowed } = require('../utils/categoryIdSafe');
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+function coerceBankDate(val) {
+  const s = val != null ? String(val).trim() : '';
+  if (!s) return new Date().toISOString().split('T')[0];
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  if (/^\d{2}\/\d{2}\/\d{4}/.test(s)) return `${s.slice(6, 10)}-${s.slice(3, 5)}-${s.slice(0, 2)}`;
+  const d = new Date(s);
+  if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  return new Date().toISOString().split('T')[0];
+}
 
 function normalizeHeaderKey(k) {
   return String(k || '')
@@ -78,7 +89,6 @@ function pickBankDescriptionFromRow(r) {
 }
 
 function toBankTransactions(rows) {
-  const today = new Date().toISOString().split('T')[0];
   return (rows || []).map((r) => {
     const desc = pickBankDescriptionFromRow(r);
     let signed = null;
@@ -91,7 +101,7 @@ function toBankTransactions(rows) {
       signed = r.payment_method === 'debito' ? -g : g;
     }
     return {
-      entry_date: r.sale_date && String(r.sale_date).slice(0, 10) ? String(r.sale_date).slice(0, 10) : today,
+      entry_date: coerceBankDate(r.sale_date || r.raw_data?.date),
       description: desc,
       amount: Math.round(signed * 100) / 100,
       balance: r.balance != null ? parseFloat(r.balance) : null,
@@ -110,15 +120,21 @@ router.post('/:companyId/import',
     try {
       let transactions = [];
 
-      if (['jpg', 'jpeg', 'png', 'pdf'].includes(ext)) {
+      if (['jpg', 'jpeg', 'png', 'pdf', 'webp'].includes(ext)) {
         const result = await gemini.readBankStatement(req.file.buffer, req.file.mimetype);
         if (!result.success) return res.status(422).json({ error: result.error });
-        transactions = (result.data.transactions || []).map((t) => ({
-          entry_date: (t.date && String(t.date).slice(0, 10)) || new Date().toISOString().split('T')[0],
-          description: String(t.description || '—').slice(0, 300),
-          amount: parseFloat(t.amount) || 0,
-          balance: t.balance != null ? parseFloat(t.balance) : null,
-        })).filter((t) => t.amount !== 0);
+        transactions = (result.data.transactions || []).map((t) => {
+          const raw = parseFloat(t.amount);
+          const amount = Number.isFinite(raw) ? Math.round(raw * 100) / 100 : 0;
+          const balRaw = t.balance != null ? parseFloat(t.balance) : null;
+          const balance = balRaw != null && Number.isFinite(balRaw) ? Math.round(balRaw * 100) / 100 : null;
+          return {
+            entry_date: coerceBankDate(t.date),
+            description: String(t.description || '—').slice(0, 300),
+            amount,
+            balance,
+          };
+        }).filter((t) => t.amount !== 0);
       } else {
         const rows = await importer.parse(req.file.buffer, req.file.originalname, req.file.mimetype);
         transactions = toBankTransactions(rows);
@@ -194,15 +210,17 @@ router.post('/:companyId/import',
           }
 
           /* Mantém "pending" na lista padrão mesmo com categoria sugerida — evita "sumir" da aba Pendentes. */
+          const safeCatId = categoryIdIfAllowed(catId, catList);
+          const aiSafe = aiSuggestion != null ? String(aiSuggestion).trim().slice(0, 200) : null;
           const { data: entry, error: entErr } = await supabase.from('bank_entries').insert({
             company_id: req.companyId,
             statement_id: stmt.id,
-            entry_date: t.entry_date,
-            description: t.description || '—',
-            amount: t.amount,
+            entry_date: coerceBankDate(t.entry_date),
+            description: (t.description || '—').toString().slice(0, 300),
+            amount: Number.isFinite(t.amount) ? t.amount : 0,
             balance: t.balance,
-            category_id: catId,
-            ai_suggestion: aiSuggestion,
+            category_id: safeCatId,
+            ai_suggestion: aiSafe || null,
             status: 'pending',
           }).select('id').single();
 
@@ -250,8 +268,14 @@ router.patch('/:companyId/entries/:id/classify',
   authenticate, requireCompanyAccess, requirePermission('conciliacao'),
   async (req, res) => {
     const { categoryId, payableId, status = 'classified' } = req.body;
+    const { data: clsCats } = await supabase.from('categories')
+      .select('id')
+      .or(`company_id.eq.${req.companyId},company_id.is.null`)
+      .eq('active', true);
+    const safeCat = categoryIdIfAllowed(categoryId, clsCats || []);
+
     const { error } = await supabase.from('bank_entries')
-      .update({ category_id: categoryId, payable_id: payableId, status })
+      .update({ category_id: safeCat, payable_id: payableId || null, status })
       .eq('id', req.params.id).eq('company_id', req.companyId);
 
     if (error) return res.status(400).json({ error: error.message });

@@ -1,6 +1,6 @@
 const router  = require('express').Router();
 const supabase = require('../db');
-const { authenticate, requireAdmin } = require('../middlewares/auth');
+const { authenticate, requireAdmin, requireCompanyAccess } = require('../middlewares/auth');
 
 // GET /api/companies
 router.get('/', authenticate, async (req, res) => {
@@ -54,6 +54,29 @@ router.get('/:id/categories', authenticate, async (req, res) => {
     .eq('active', true).order('name');
   if (error) return res.status(500).json({ error: error.message });
   res.json({ data });
+});
+
+// POST /api/companies/:id/categories — categoria própria da empresa (extrato + documentos)
+router.post('/:id/categories', authenticate, (req, res, next) => {
+  req.params.companyId = req.params.id;
+  next();
+}, requireCompanyAccess, async (req, res) => {
+  const companyId = req.companyId;
+  const { name, type = 'despesa', color = '#94a3b8' } = req.body;
+  const trimmed = String(name || '').trim().slice(0, 200);
+  if (!trimmed) return res.status(400).json({ error: 'Nome da categoria é obrigatório' });
+  const allowedTypes = ['despesa', 'receita', 'ambos'];
+  const t = allowedTypes.includes(type) ? type : 'despesa';
+  const col = String(color || '').trim().slice(0, 7) || '#94a3b8';
+
+  const { data, error } = await supabase
+    .from('categories')
+    .insert({ company_id: companyId, name: trimmed, type: t, color: col })
+    .select('id,name,type,color')
+    .single();
+
+  if (error) return res.status(400).json({ error: error.message });
+  res.status(201).json(data);
 });
 
 module.exports = router;

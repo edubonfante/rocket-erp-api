@@ -6,6 +6,8 @@ const salesImporter = require('../services/salesImporter');
 const { authenticate, requireCompanyAccess, requirePermission } = require('../middlewares/auth');
 const logger  = require('../utils/logger');
 const { matchCompanyCategoryId } = require('../utils/categoryMatch');
+const { categoryIdIfAllowed } = require('../utils/categoryIdSafe');
+const { signRocketDocUrl } = require('../utils/storageSignedUrl');
 
 function coercePgDate(val) {
   if (!val) return null;
@@ -16,20 +18,11 @@ function coercePgDate(val) {
   return null;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-/** Evita enviar "" ou texto inválido para category_id (Postgres uuid). */
-function cleanCategoryId(v) {
-  if (v == null) return null;
-  const s = String(v).trim();
-  if (!s || s === 'undefined' || s === 'null') return null;
-  return UUID_RE.test(s) ? s : null;
-}
-
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
   fileFilter: (_, file, cb) => {
-    const ok = ['image/jpeg','image/png','image/webp','image/heic','application/pdf'];
+    const ok = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'application/pdf'];
     cb(null, ok.includes(file.mimetype));
   }
 });
@@ -74,7 +67,8 @@ router.post('/:companyId/upload',
 
       if (uploadErr) throw new Error('Erro no upload: ' + uploadErr.message);
 
-      const fileUrl = supabase.storage.from('rocket-erp-docs').getPublicUrl(storagePath).data.publicUrl;
+      const fileUrlPublic = supabase.storage.from('rocket-erp-docs').getPublicUrl(storagePath).data.publicUrl;
+      const fileUrlSigned = (await signRocketDocUrl(fileUrlPublic)) || fileUrlPublic;
 
       // 2. Lê com Gemini
       const geminiResult = await gemini.readDocument(req.file.buffer, req.file.mimetype);
@@ -95,7 +89,7 @@ router.post('/:companyId/upload',
         .eq('active', true);
       const uploadCats = uploadCatsRaw || [];
 
-      let resolvedCategoryId = categoryId;
+      let resolvedCategoryId = categoryIdIfAllowed(categoryId, uploadCats);
       if (!resolvedCategoryId && docData.suggested_category) {
         resolvedCategoryId = matchCompanyCategoryId(uploadCats, docData.suggested_category, { preferTypes: ['despesa', 'ambos'] });
       }
@@ -112,7 +106,7 @@ router.post('/:companyId/upload',
         .insert({
           company_id:      req.companyId,
           client_user_id:  req.user.id,
-          file_url:        fileUrl,
+          file_url:        fileUrlPublic,
           file_name:       req.file.originalname,
           doc_type:        docData.doc_type || 'outro',
           detected_value:  detectedVal,
@@ -120,7 +114,7 @@ router.post('/:companyId/upload',
           confirmed_value: confirmedVal,
           supplier_name:   docData.supplier_name,
           supplier_cnpj:   docData.supplier_cnpj,
-          category_id:     cleanCategoryId(resolvedCategoryId) || null,
+          category_id:     categoryIdIfAllowed(resolvedCategoryId, uploadCats),
           gemini_data:     docData,
           confidence:      docData.confidence || 0,
           status:          'pending',
@@ -156,7 +150,9 @@ router.post('/:companyId/upload',
           const payables = [];
           for (const item of items) {
             let itemCategoryId = resolvedCategoryId;
-            if (item.category) {
+            const exUp = categoryIdIfAllowed(item.category_id || item.catId, uploadCats);
+            if (exUp) itemCategoryId = exUp;
+            else if (item.category) {
               const mid = matchCompanyCategoryId(uploadCats, String(item.category), { preferTypes: ['despesa', 'ambos'] });
               if (mid) itemCategoryId = mid;
             }
@@ -182,7 +178,7 @@ router.post('/:companyId/upload',
               .from('payables')
               .insert({
                 company_id:  req.companyId,
-                category_id: cleanCategoryId(itemCategoryId) || null,
+                category_id: categoryIdIfAllowed(itemCategoryId, uploadCats),
                 description: (docType + ' — ' + supplier + ' | ' + itemDesc).slice(0, 300),
                 amount:      itemNet,
                 due_date:    due,
@@ -224,7 +220,7 @@ router.post('/:companyId/upload',
             .from('payables')
             .insert({
               company_id:  req.companyId,
-              category_id: cleanCategoryId(resolvedCategoryId) || null,
+              category_id: categoryIdIfAllowed(resolvedCategoryId, uploadCats),
               description: (docType + ' — ' + supplier).slice(0, 300),
               amount:      value,
               due_date:    due,
@@ -259,7 +255,7 @@ router.post('/:companyId/upload',
 
       const launchOk = !!(payable && payable.id);
       res.json({
-        document: { id: doc.id, file_url: fileUrl },
+        document: { id: doc.id, file_url: fileUrlSigned },
         gemini:   docData,
         payable,
         auto_posted: shouldPost && launchOk,
@@ -408,7 +404,7 @@ router.post('/:companyId/:documentId/launch-items',
     }
 
     const docData = doc.gemini_data || {};
-    let resolvedCategoryId = categoryId || doc.category_id;
+    let resolvedCategoryId = categoryIdIfAllowed(categoryId, companyCats) || categoryIdIfAllowed(doc.category_id, companyCats);
     if (!resolvedCategoryId && docData.suggested_category) {
       resolvedCategoryId = matchCompanyCategoryId(companyCats, docData.suggested_category, { preferTypes: ['despesa', 'ambos'] });
     }
@@ -430,7 +426,7 @@ router.post('/:companyId/:documentId/launch-items',
     const payables = [];
     for (const item of userItems) {
       let itemCategoryId = resolvedCategoryId;
-      const explicitCat = cleanCategoryId(item.category_id) || cleanCategoryId(item.catId);
+      const explicitCat = categoryIdIfAllowed(item.category_id, companyCats) || categoryIdIfAllowed(item.catId, companyCats);
       if (explicitCat) {
         itemCategoryId = explicitCat;
       } else {
@@ -462,7 +458,7 @@ router.post('/:companyId/:documentId/launch-items',
         .from('payables')
         .insert({
           company_id:       req.companyId,
-          category_id:      cleanCategoryId(itemCategoryId) || null,
+          category_id:      categoryIdIfAllowed(itemCategoryId, companyCats),
           description:      (docType + ' — ' + supplier + ' | ' + desc).slice(0, 300),
           amount:           itemNet,
           due_date:         due,
@@ -579,6 +575,15 @@ router.get('/:companyId',
       }
     }
 
+    await Promise.all(
+      (docRows || [])
+        .filter((d) => d.file_url)
+        .map(async (d) => {
+          const signed = await signRocketDocUrl(d.file_url);
+          if (signed) d.file_url = signed;
+        }),
+    );
+
     res.json({ data: docRows, total: count });
   }
 );
@@ -598,12 +603,20 @@ router.patch('/:companyId/:id/confirm',
     if (doc.status === 'posted' || doc.status === 'auto_posted' || doc.payable_id)
       return res.status(400).json({ error: 'Documento já lançado' });
 
+    const { data: confirmCatsRaw } = await supabase
+      .from('categories')
+      .select('id,name,type,company_id')
+      .or(`company_id.eq.${req.companyId},company_id.is.null`)
+      .eq('active', true);
+    const confirmCats = confirmCatsRaw || [];
+    const safeCat = categoryIdIfAllowed(categoryId, confirmCats) || categoryIdIfAllowed(doc.category_id, confirmCats);
+
     // Cria conta a pagar
     const { data: payable } = await supabase
       .from('payables')
       .insert({
         company_id:  req.companyId,
-        category_id: cleanCategoryId(categoryId) || cleanCategoryId(doc.category_id) || null,
+        category_id: safeCat,
         description: `${(doc.doc_type||'DOC').toUpperCase()} — ${doc.supplier_name || doc.file_name}`,
         amount:      confirmedValue || doc.detected_value,
         due_date:    confirmedDate || doc.detected_date || new Date().toISOString().split('T')[0],
