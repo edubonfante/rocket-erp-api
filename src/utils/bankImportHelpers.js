@@ -279,7 +279,28 @@ function estimateBankFileDataRows(buffer, ext) {
       const sh = n0 ? wb.Sheets[n0] : null;
       if (!sh) return null;
       importer.expandWorksheetRange(sh);
-      const rows = xlsx.utils.sheet_to_json(sh, { defval: null });
+      // Detectar header correto (ex: extrato Itau tem linhas de cabecalho antes dos dados)
+      const rawArr = xlsx.utils.sheet_to_json(sh, { header: 1, defval: null });
+      let rows = xlsx.utils.sheet_to_json(sh, { defval: null });
+      let headerRowIdx = -1;
+      for (let i = 0; i < Math.min(rawArr.length, 20); i++) {
+        const row = (rawArr[i] || []);
+        const rowStr = row.map(c => String(c || '').toLowerCase()).join(' ');
+        if (i > 0 && ((rowStr.includes('data') && rowStr.includes('valor')) ||
+            rowStr.includes('lancamento') || rowStr.includes('historico') ||
+            (rowStr.includes('data') && (rowStr.includes('debito') || rowStr.includes('credito') || rowStr.includes('saldo'))))) {
+          headerRowIdx = i;
+          break;
+        }
+      }
+      if (headerRowIdx > 0) {
+        const headers = rawArr[headerRowIdx].map((h, i) => String(h || 'col' + i).trim());
+        rows = rawArr.slice(headerRowIdx + 1).map(row => {
+          const obj = {};
+          headers.forEach((h, i) => { obj[h] = row[i] != null ? row[i] : null; });
+          return obj;
+        });
+      }
       return rows.filter(
         (r) => r && typeof r === 'object' && Object.keys(r).some((k) => r[k] != null && String(r[k]).trim() !== ''),
       ).length;
