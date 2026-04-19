@@ -119,7 +119,7 @@ router.post('/:companyId/analyze',
         .or(`company_id.eq.${req.companyId},company_id.is.null`)
         .eq('active', true);
       const expenseNames = (analyzeCats || [])
-        .filter((c) => !c.type || ['despesa', 'ambos'].includes(c.type))
+        .filter((c) => !c.type || ['despesa', 'ambos', 'custo', 'receita', 'imposto', 'financeiro', 'variavel', 'investimento', 'saida', 'deducao'].includes(c.type))
         .map((c) => c.name);
       const result = await gemini.readDocument(req.file.buffer, req.file.mimetype, req.file.originalname, {
         expenseCategoryNames: expenseNames,
@@ -170,7 +170,7 @@ router.post('/:companyId/upload',
         .eq('active', true);
       const uploadCats = uploadCatsRaw || [];
       const expenseNames = uploadCats
-        .filter((c) => !c.type || ['despesa', 'ambos'].includes(c.type))
+        .filter((c) => !c.type || ['despesa', 'ambos', 'custo', 'receita', 'imposto', 'financeiro', 'variavel', 'investimento', 'saida', 'deducao'].includes(c.type))
         .map((c) => c.name);
 
       // 1. Gemini primeiro (falha rápido; evita arquivo órfão no Storage se a leitura quebrar)
