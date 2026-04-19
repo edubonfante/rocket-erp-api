@@ -104,6 +104,11 @@ REGRA DE OURO - ANTES DE TUDO:
 - Qualquer item com "CHOC", "CHOCOLATE", "KIT KAT", "BIS ", "LACTA", "NESTLE CHOC", "CACAU", "NESCAU", "ACHOCOLATADO" no nome = SEMPRE "Sobremesa - Cafe". NUNCA Hortifruti.
 - "Hortifruti" = SOMENTE frutas frescas, legumes frescos e verduras. Ex: tomate, cebola, alface, banana, laranja. NUNCA use para produtos industrializados.
 - Produtos com prefixo "REFR." = refrigerante = "Bebidas - Agua, refrigerantes e sucos"
+- "LIMP.", "ALCOOL", "DETERG", "SABAO", "DESINF", "MULTIUSO", "CLORO", "ALVEJ" = "Material de Higiene e Limpeza"
+- "CANELA", "LIMAO PEPPER", "PIMENTA", "TEMPERO", "OREGANO", "COLORAU", "COMINHO", "MOSTARDA PO", "CURRY", "PAPRICA" = "Secos - Molhos e Temperos"
+- "OLEO DE SOJA", "AZEITE", "VINAGRE", "BANHA" = "Secos - Oleos e Azeites"
+- "FARINHA", "AMIDO", "FUBA", "POLVILHO", "MAIZENA" = "Secos - Farinaceos"
+- "MARGARINA", "MANTEIGA" = "Laticinios - Derivados"
 - Produtos com "ALC." ou "ALCOOL" no nome e produto de limpeza = "Material de Higiene e Limpeza"
 
 0) NCM (Nota Fiscal, NFC-e, cupom SAT/CF-e, XML/DANFE em imagem): em CADA item de produto, leia e preencha "ncm" com os 4 a 8 dígitos do código NCM quando existir no documento (colunas "NCM", "Cód. fiscal", "Classif. fiscal", etc.). O NCM é a referência fiscal principal da mercadoria no Brasil — use a família do NCM (capítulo/posição, ex.: bebidas, laticínios, café/chá, carnes) como base PRINCIPAL para escolher "category" e para aproximar ao PLANO DA EMPRESA. Se o cupom listar NCM por linha, um NCM por item; não invente dígitos.

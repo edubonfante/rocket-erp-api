@@ -41,6 +41,21 @@ function inferRetailNcmHighlight(item) {
   const ncmSorv = /^(2105)/.test(digits);
   if (lexSorv || ncmSorv) return 'Sobremesa - Sobremesa';
 
+  // Temperos e condimentos (NCM cap. 09 = especiarias, 21 = preparacoes)
+  const lexTemp = /\b(canela|limao pepper|pimenta|tempero|oregano|colorau|cominho|mostarda po|curry|paprica|louro|curcuma|gengibre po|cravo|noz moscada|ervas finas)\b/.test(blob);
+  const ncmTemp = /^(0904|0905|0906|0907|0908|0909|0910|2103)/.test(digits);
+  if (lexTemp || ncmTemp) return 'Secos - Molhos e Temperos';
+
+  // Oleos e azeites (NCM cap. 15)
+  const lexOleo = /\b(oleo de soja|azeite|vinagre|banha|gordura vegetal|oleo vegetal)\b/.test(blob);
+  const ncmOleo = /^(1507|1508|1509|1510|1511|1512|1513|1514|1515|1516|1517|1518|2209)/.test(digits);
+  if (lexOleo || ncmOleo) return 'Secos - Oleos e Azeites';
+
+  // Farinaceos (NCM cap. 11)
+  const lexFar = /\b(farinha de trigo|fuba|amido|polvilho|maizena|creme de arroz|farinha de rosca)\b/.test(blob);
+  const ncmFar = /^(1101|1102|1103|1104|1105|1106|1107|1108|1109)/.test(digits);
+  if (lexFar || ncmFar) return 'Secos - Farinaceos';
+
   // Padaria (NCM cap. 19)
   const lexPad = /\b(pao |biscoito|bolacha|wafer|bolo|croissant|brioche|torrada|rosca|pao de queijo)\b/.test(blob);
   const ncmPad = /^(1901|1902|1903|1904|1905)/.test(digits);
