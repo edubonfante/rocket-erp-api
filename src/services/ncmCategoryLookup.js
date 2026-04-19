@@ -21,13 +21,36 @@ function normalizeLoose(s) {
 function inferRetailNcmHighlight(item) {
   const blob = normalizeLoose([item.description, item.category, item.ncm].filter(Boolean).join(' '));
   const digits = normalizeNcmDigits(item.ncm);
-  const lex =
-    /\b(salsicha|mortadela|presunto|salame|linguica|linguia|peito de peru|fiambre|apresuntado|embutid|defumad|bacon|nugget|blanquet|calabresa|rocambole|paio|mortadel|salamin|charque|copalombo|copa lombo|pernil|toucinho|panceta|lombo canadense)\b/.test(
-      blob,
-    );
-  /* 0210 = carnes salgadas/defumadas; 1601/1602 = preparações e embutidos; 1604 = preparações de carne/peixe. */
+  // Embutidos e charcutaria
+  const lexEmb = /\b(salsicha|mortadela|presunto|salame|linguica|linguia|peito de peru|fiambre|apresuntado|embutid|defumad|bacon|nugget|blanquet|calabresa|rocambole|paio|mortadel|salamin|charque|copalombo|copa lombo|pernil|toucinho|panceta|lombo canadense)\b/.test(blob);
   const ncmEmb = /^(0210|1601|1602|1604)/.test(digits);
-  if (lex || ncmEmb) return 'Frios e Embutidos';
+  if (lexEmb || ncmEmb) return 'Frios e Embutidos';
+
+  // Chocolate, cacau e derivados (NCM cap. 18)
+  const lexChoc = /\b(chocolate|cacau|achocolatado|nescau|toblerone|cobertura de chocolate|nutella)\b/.test(blob);
+  const ncmChoc = /^(1801|1802|1803|1804|1805|1806)/.test(digits);
+  if (lexChoc || ncmChoc) return 'Sobremesa - Cafe';
+
+  // Cafe, cha (NCM cap. 09)
+  const lexCafe = /\b(cafe|expresso|cappuccino|cha |nescafe|pilao|nespresso|dolce gusto)\b/.test(blob);
+  const ncmCafe = /^(0901|0902|0903|0904|0905|0906|0907|0908|0909|0910)/.test(digits);
+  if (lexCafe || ncmCafe) return 'Sobremesa - Cafe';
+
+  // Sorvete (NCM 2105)
+  const lexSorv = /\b(sorvete|gelado|picole|sundae|milkshake)\b/.test(blob);
+  const ncmSorv = /^(2105)/.test(digits);
+  if (lexSorv || ncmSorv) return 'Sobremesa - Sobremesa';
+
+  // Padaria (NCM cap. 19)
+  const lexPad = /\b(pao |biscoito|bolacha|wafer|bolo|croissant|brioche|torrada|rosca|pao de queijo)\b/.test(blob);
+  const ncmPad = /^(1901|1902|1903|1904|1905)/.test(digits);
+  if (lexPad || ncmPad) return 'Padaria';
+
+  // Hortifruti apenas frutas/legumes/verduras reais
+  const lexHorti = /\b(alface|tomate|cebola|alho|batata |cenoura|brocolis|abobrinha|pimentao|pepino|couve|espinafre|manga|banana|laranja|limao|abacaxi|morango|uva |melao|melancia|mamao|pera |maca |kiwi|abacate|beterraba|inhame|mandioca|quiabo)\b/.test(blob);
+  const ncmHorti = /^(07|08)/.test(digits);
+  if (lexHorti || ncmHorti) return 'Hortifruti';
+
   return null;
 }
 
