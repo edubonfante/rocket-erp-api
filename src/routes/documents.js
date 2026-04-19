@@ -5,9 +5,22 @@ const gemini  = require('../services/geminiReader');
 const salesImporter = require('../services/salesImporter');
 const { authenticate, requireCompanyAccess, requirePermission } = require('../middlewares/auth');
 const logger  = require('../utils/logger');
-const { matchCompanyCategoryId } = require('../utils/categoryMatch');
-const { categoryIdIfAllowed } = require('../utils/categoryIdSafe');
+const {
+  matchCompanyCategoryId,
+  categoryIdIsComprasOuFreteGenerico,
+  docItemsSuggestRetailStock,
+  labelLooksLikeRetailStockLine,
+} = require('../utils/categoryMatch');
+const {
+  categoryIdIfAllowed,
+  payableCategoryIdOrFallback,
+  pickFallbackExpenseCategoryId,
+} = require('../utils/categoryIdSafe');
 const { signRocketDocUrl } = require('../utils/storageSignedUrl');
+const {
+  enrichGeminiDocItemsWithNcmReference,
+  applyDominantCategoryFromItems,
+} = require('../services/ncmCategoryLookup');
 
 function coercePgDate(val) {
   if (!val) return null;
@@ -16,6 +29,12 @@ function coercePgDate(val) {
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
   if (/^\d{2}\/\d{2}\/\d{4}/.test(s)) return `${s.slice(6, 10)}-${s.slice(3, 5)}-${s.slice(0, 2)}`;
   return null;
+}
+
+/** due_date em payables: sempre ISO; Gemini/UI podem mandar DD/MM/AAAA. */
+function dueDateForPayable(confirmedDate, docData, fallbackRaw) {
+  const raw = confirmedDate || docData?.due_date || docData?.issue_date;
+  return coercePgDate(raw) || coercePgDate(fallbackRaw) || new Date().toISOString().split('T')[0];
 }
 
 /** Evita NaN/undefined no JSONB e valores que quebram o insert no Postgres. */
@@ -39,18 +58,32 @@ function clamp01(n) {
   return Math.min(1, Math.max(0, x));
 }
 
+function formatClientDocumentsInsertError(docErr) {
+  const m = docErr?.message || String(docErr);
+  if (/schema cache|PGRST204|Could not find the 'category_id' column of 'client_documents'/i.test(m)) {
+    return (
+      'O PostgREST do Supabase ainda não enxerga a coluna category_id em client_documents. '
+      + 'No painel do MESMO projeto do SUPABASE_URL da API (ex.: Cloud Run → variáveis): abra SQL Editor, '
+      + 'rode o arquivo supabase/migrations/006_client_documents_api_columns.sql (com ALTER TABLE … e no final NOTIFY pgrst). '
+      + 'No terminal: cd backend && npm run db:apply-006 (precisa SUPABASE_DB_PASSWORD no .env). '
+      + 'Detalhe técnico: ' + m
+    );
+  }
+  return m;
+}
+
 /** Reduz JSONB gigante (raw_text/itens) — evita OOM e payloads que derrubam o Node em hosts pequenos (Railway). */
 function trimGeminiDocForPayload(obj) {
   if (!obj || typeof obj !== 'object') return obj;
   const o = { ...obj };
-  if (typeof o.raw_text === 'string' && o.raw_text.length > 45000) {
-    o.raw_text = `${o.raw_text.slice(0, 45000)}\n…[truncado — limite do servidor]`;
+  if (typeof o.raw_text === 'string' && o.raw_text.length > 225000) {
+    o.raw_text = `${o.raw_text.slice(0, 225000)}\n…[truncado — limite do servidor]`;
   }
-  if (typeof o.observations === 'string' && o.observations.length > 4000) {
-    o.observations = o.observations.slice(0, 4000);
+  if (typeof o.observations === 'string' && o.observations.length > 20000) {
+    o.observations = o.observations.slice(0, 20000);
   }
-  if (Array.isArray(o.items) && o.items.length > 250) {
-    o.items = o.items.slice(0, 250);
+  if (Array.isArray(o.items) && o.items.length > 1250) {
+    o.items = o.items.slice(0, 1250);
   }
   return o;
 }
@@ -60,8 +93,14 @@ const upload = multer({
   /* Railway e similares: PDF+Gemini duplicam memória (buffer + base64); 15MB reduz risco de OOM. */
   limits: { fileSize: 15 * 1024 * 1024 },
   fileFilter: (_, file, cb) => {
-    const ok = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'application/pdf'];
-    cb(null, ok.includes(file.mimetype));
+    const m = String(file.mimetype || '').toLowerCase().split(';')[0].trim();
+    const ok = ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'application/pdf'];
+    if (ok.includes(m)) return cb(null, true);
+    /* Android/câmera às vezes manda octet-stream com extensão de imagem */
+    if (m === 'application/octet-stream' && /\.(jpe?g|png|webp|heic|heif|pdf)$/i.test(file.originalname || '')) {
+      return cb(null, true);
+    }
+    cb(null, false);
   }
 });
 
@@ -74,15 +113,34 @@ router.post('/:companyId/analyze',
     if (!req.file) return res.status(400).json({ error: 'Imagem não enviada' });
 
     try {
-      const result = await gemini.readDocument(req.file.buffer, req.file.mimetype);
+      const { data: analyzeCats } = await supabase
+        .from('categories')
+        .select('name,type')
+        .or(`company_id.eq.${req.companyId},company_id.is.null`)
+        .eq('active', true);
+      const expenseNames = (analyzeCats || [])
+        .filter((c) => !c.type || ['despesa', 'ambos'].includes(c.type))
+        .map((c) => c.name);
+      const result = await gemini.readDocument(req.file.buffer, req.file.mimetype, req.file.originalname, {
+        expenseCategoryNames: expenseNames,
+      });
       if (!result.success) {
-        return res.status(422).json({ error: 'Não foi possível ler o documento', detail: result.error });
+        const msg = result.error || 'Não foi possível ler o documento';
+        return res.status(422).json({ error: msg, detail: msg });
+      }
+      try {
+        result.data = applyDominantCategoryFromItems(
+          await enrichGeminiDocItemsWithNcmReference(result.data),
+        );
+      } catch (ncmErr) {
+        logger.warn('Document analyze: enriquecimento NCM ignorado:', ncmErr.message);
       }
       res.json(result.data);
     } catch (err) {
-      logger.error('Document analyze error:', err);
+      const em = (err?.message || String(err) || 'Erro ao analisar documento').trim().slice(0, 800);
+      logger.error('Document analyze error:', em);
       if (!res.headersSent) {
-        res.status(500).json({ error: err.message || 'Erro ao analisar documento' });
+        res.status(500).json({ error: em, detail: em });
       }
     }
   }
@@ -105,21 +163,42 @@ router.post('/:companyId/upload',
 
     let storagePath = null;
     try {
+      const { data: uploadCatsRaw } = await supabase
+        .from('categories')
+        .select('id,name,type,company_id')
+        .or(`company_id.eq.${req.companyId},company_id.is.null`)
+        .eq('active', true);
+      const uploadCats = uploadCatsRaw || [];
+      const expenseNames = uploadCats
+        .filter((c) => !c.type || ['despesa', 'ambos'].includes(c.type))
+        .map((c) => c.name);
+
       // 1. Gemini primeiro (falha rápido; evita arquivo órfão no Storage se a leitura quebrar)
-      const geminiResult = await gemini.readDocument(req.file.buffer, req.file.mimetype);
+      const geminiResult = await gemini.readDocument(req.file.buffer, req.file.mimetype, req.file.originalname, {
+        expenseCategoryNames: expenseNames,
+      });
       if (!geminiResult.success) {
+        const ge = geminiResult.error || 'Falha na leitura do documento';
         return res.status(422).json({
-          error: 'Erro ao analisar a imagem',
-          detail: geminiResult.error,
+          error: ge,
+          detail: ge,
         });
       }
-      const docData = geminiResult.data;
+      let docData = geminiResult.data;
+      try {
+        docData = applyDominantCategoryFromItems(
+          await enrichGeminiDocItemsWithNcmReference(docData),
+        );
+      } catch (ncmErr) {
+        logger.warn('Document upload: enriquecimento NCM ignorado:', ncmErr.message);
+      }
 
       // 2. Upload para Supabase Storage
       storagePath = `documents/${req.companyId}/${Date.now()}_${req.file.originalname}`;
+      const storageMime = gemini.normalizeMimeType(req.file.mimetype, req.file.originalname);
       const { error: uploadErr } = await supabase.storage
         .from('rocket-erp-docs')
-        .upload(storagePath, req.file.buffer, { contentType: req.file.mimetype });
+        .upload(storagePath, req.file.buffer, { contentType: storageMime });
 
       if (uploadErr) throw new Error('Erro no upload: ' + uploadErr.message);
 
@@ -135,17 +214,57 @@ router.post('/:companyId/upload',
 
       const geminiPayload = jsonSafeForPostgres(trimGeminiDocForPayload(docData)) || {};
 
-      // 3. Categorias da empresa (para casar nomes do Gemini com o plano de contas)
-      const { data: uploadCatsRaw } = await supabase
-        .from('categories')
-        .select('id,name,type,company_id')
-        .or(`company_id.eq.${req.companyId},company_id.is.null`)
-        .eq('active', true);
-      const uploadCats = uploadCatsRaw || [];
+      // 3. Categorias já carregadas antes do Gemini (uploadCats)
 
+      const docMatchOpts = {
+        preferTypes: ['despesa', 'ambos'],
+        deemphasizeTaxExpenseCategories: true,
+        excludeComprasFreteForStockLines: true,
+      };
       let resolvedCategoryId = categoryIdIfAllowed(categoryId, uploadCats);
-      if (!resolvedCategoryId && docData.suggested_category) {
-        resolvedCategoryId = matchCompanyCategoryId(uploadCats, docData.suggested_category, { preferTypes: ['despesa', 'ambos'] });
+      /* Itens / NCM antes do suggested_category do documento — evita “Compras e fretes” genérico sobre NF de mercadoria. */
+      if (!resolvedCategoryId && Array.isArray(docData.items) && docData.items.length) {
+        for (const it of docData.items) {
+          const ref = it.ncm_category_reference != null && String(it.ncm_category_reference).trim() !== ''
+            ? String(it.ncm_category_reference).trim()
+            : null;
+          if (ref) {
+            const mid = matchCompanyCategoryId(uploadCats, ref, docMatchOpts);
+            if (mid) {
+              resolvedCategoryId = mid;
+              break;
+            }
+          }
+          const catLab = it.category != null && String(it.category).trim() !== '' ? String(it.category).trim() : null;
+          if (catLab) {
+            const mid = matchCompanyCategoryId(uploadCats, catLab, docMatchOpts);
+            if (mid) {
+              resolvedCategoryId = mid;
+              break;
+            }
+          }
+          const lineCtx = [
+            docData.supplier_name,
+            it.description,
+            it.desc,
+            it.ncm ? `NCM ${String(it.ncm).replace(/\D/g, '')}` : null,
+          ]
+            .filter((x) => x != null && String(x).trim() !== '')
+            .join(' | ');
+          if (lineCtx.trim()) {
+            const mid = matchCompanyCategoryId(uploadCats, lineCtx, docMatchOpts);
+            if (mid) {
+              resolvedCategoryId = mid;
+              break;
+            }
+          }
+        }
+      }
+      if (!resolvedCategoryId && docData.suggested_category != null && docData.suggested_category !== '') {
+        const sugId = matchCompanyCategoryId(uploadCats, String(docData.suggested_category), docMatchOpts);
+        if (sugId && !(categoryIdIsComprasOuFreteGenerico(uploadCats, sugId) && docItemsSuggestRetailStock(docData))) {
+          resolvedCategoryId = sugId;
+        }
       }
 
       // 4. Insere documento
@@ -176,16 +295,28 @@ router.post('/:companyId/upload',
         })
         .select('id').single();
 
-      if (docErr) throw new Error(docErr.message);
+      if (docErr) throw new Error(formatClientDocumentsInsertError(docErr));
 
       // 5. Cria lançamentos POR ITEM se forcePost ou confiança >= 0.85
       let payable = null;
       const totalValNum = salesImporter.parseMoneyBr(docData.total_value);
-      const shouldPost = forcePost === 'true' || (clamp01(docData.confidence) >= 0.85 && totalValNum > 0);
+      let shouldPost = forcePost === 'true' || (clamp01(docData.confidence) >= 0.85 && totalValNum > 0);
+      if (shouldPost && !pickFallbackExpenseCategoryId(uploadCats)) {
+        logger.warn('Document upload: lançamento automático ignorado — empresa sem categorias de despesa.');
+        shouldPost = false;
+      }
 
       if (shouldPost) {
-        const items = (userItems && userItems.length > 0) ? userItems : (docData.items && docData.items.length > 0 ? docData.items : null);
-        const due = confirmedDate || docData.due_date || docData.issue_date || new Date().toISOString().split('T')[0];
+        let items = (userItems && userItems.length > 0) ? userItems : (docData.items && docData.items.length > 0 ? docData.items : null);
+        if (items && items.length) {
+          try {
+            const er = await enrichGeminiDocItemsWithNcmReference({ items });
+            if (Array.isArray(er?.items)) items = er.items;
+          } catch (e) {
+            logger.warn('Document upload (auto-post): NCM enrich nos itens ignorado:', e.message);
+          }
+        }
+        const due = dueDateForPayable(confirmedDate, docData, detectedDate);
         const supplier = docData.supplier_name || req.file.originalname;
         const docType = (docData.doc_type || 'DOC').toUpperCase();
         const docLevelPaymentAuto = docData.payment_method || null;
@@ -202,21 +333,48 @@ router.post('/:companyId/upload',
         if (items && items.length > 0) {
           // Lança um payable por item
           const payables = [];
+          const docConf = clamp01(docData.confidence);
+          const matchOpts = docMatchOpts;
           for (const item of items) {
             let itemCategoryId = resolvedCategoryId;
-            const exUp = categoryIdIfAllowed(item.category_id || item.catId, uploadCats);
+            /* Não use (category_id || catId): um category_id inválido do Gemini “oculta” o catId escolhido no app. */
+            const exUp = categoryIdIfAllowed(item.catId, uploadCats)
+              || categoryIdIfAllowed(item.categoryId, uploadCats)
+              || categoryIdIfAllowed(item.category_id, uploadCats);
             if (exUp) itemCategoryId = exUp;
-            else if (item.category) {
-              const mid = matchCompanyCategoryId(uploadCats, String(item.category), { preferTypes: ['despesa', 'ambos'] });
+            else if (item.ncm_category_reference) {
+              const mid = matchCompanyCategoryId(uploadCats, String(item.ncm_category_reference), matchOpts);
+              if (mid) itemCategoryId = mid;
+            } else if (item.category) {
+              const mid = matchCompanyCategoryId(uploadCats, String(item.category), matchOpts);
               if (mid) itemCategoryId = mid;
             }
-            if (!itemCategoryId && (item.description || item.desc)) {
-              const mid = matchCompanyCategoryId(uploadCats, String(item.description || item.desc), { preferTypes: ['despesa', 'ambos'] });
+            const lineContext = [
+              docData.supplier_name,
+              item.description || item.desc,
+              item.ncm ? `NCM ${String(item.ncm).replace(/\D/g, '')}` : null,
+              item.ncm_category_reference,
+              item.category,
+            ]
+              .filter((x) => x != null && String(x).trim() !== '')
+              .join(' | ');
+            if (!itemCategoryId && lineContext.trim()) {
+              const mid = matchCompanyCategoryId(uploadCats, lineContext, matchOpts);
               if (mid) itemCategoryId = mid;
             }
-            if (!itemCategoryId && docData.suggested_category) {
-              const mid = matchCompanyCategoryId(uploadCats, String(docData.suggested_category), { preferTypes: ['despesa', 'ambos'] });
-              if (mid) itemCategoryId = mid;
+            if (
+              !itemCategoryId
+              && docData.suggested_category != null
+              && docData.suggested_category !== ''
+              && docConf >= 0.52
+            ) {
+              const mid = matchCompanyCategoryId(uploadCats, String(docData.suggested_category), matchOpts);
+              if (
+                mid
+                && !(categoryIdIsComprasOuFreteGenerico(uploadCats, mid) && labelLooksLikeRetailStockLine(lineContext))
+              ) {
+                itemCategoryId = mid;
+              }
             }
             const itemGross = salesImporter.parseMoneyBr(item.total ?? (salesImporter.parseMoneyBr(item.unit_price) * (item.quantity || 1)));
             const itemDiscount = allocDiscount(itemGross);
@@ -232,7 +390,7 @@ router.post('/:companyId/upload',
               .from('payables')
               .insert({
                 company_id:  req.companyId,
-                category_id: categoryIdIfAllowed(itemCategoryId, uploadCats),
+                category_id: payableCategoryIdOrFallback(itemCategoryId, uploadCats),
                 description: (docType + ' — ' + supplier + ' | ' + itemDesc).slice(0, 300),
                 amount:      itemNet,
                 due_date:    due,
@@ -258,6 +416,27 @@ router.post('/:companyId/upload',
               .eq('id', doc.id);
           }
         } else {
+          let singleCategoryId = resolvedCategoryId;
+          if (!singleCategoryId && Array.isArray(docData.items) && docData.items.length) {
+            for (const it of docData.items) {
+              const ctx = [
+                docData.supplier_name,
+                it.description,
+                it.desc,
+                it.ncm ? `NCM ${String(it.ncm).replace(/\D/g, '')}` : null,
+                it.ncm_category_reference,
+                it.category,
+              ]
+                .filter((x) => x != null && String(x).trim() !== '')
+                .join(' | ');
+              if (!ctx.trim()) continue;
+              const mid = matchCompanyCategoryId(uploadCats, ctx, docMatchOpts);
+              if (mid) {
+                singleCategoryId = mid;
+                break;
+              }
+            }
+          }
           const value = confirmedValue != null && confirmedValue !== ''
             ? salesImporter.parseMoneyBr(confirmedValue)
             : salesImporter.parseMoneyBr(docData.total_value);
@@ -274,7 +453,7 @@ router.post('/:companyId/upload',
             .from('payables')
             .insert({
               company_id:  req.companyId,
-              category_id: categoryIdIfAllowed(resolvedCategoryId, uploadCats),
+              category_id: payableCategoryIdOrFallback(singleCategoryId, uploadCats),
               description: (docType + ' — ' + supplier).slice(0, 300),
               amount:      value,
               due_date:    due,
@@ -316,14 +495,15 @@ router.post('/:companyId/upload',
       });
 
     } catch (err) {
-      logger.error('Document upload error:', err);
+      const em = (err?.message || String(err) || 'Erro ao processar documento').trim().slice(0, 800);
+      logger.error(`Document upload error: ${em}`);
       if (storagePath) {
         supabase.storage.from('rocket-erp-docs').remove([storagePath]).catch((e) => {
           logger.warn('Document upload: falha ao remover arquivo após erro:', e.message);
         });
       }
       if (!res.headersSent) {
-        res.status(500).json({ error: err.message || 'Erro ao processar documento' });
+        res.status(500).json({ error: em, detail: em });
       }
     }
   }
@@ -443,6 +623,11 @@ router.post('/:companyId/:documentId/launch-items',
       .or(`company_id.eq.${req.companyId},company_id.is.null`)
       .eq('active', true);
     const companyCats = companyCatsRaw || [];
+    if (!pickFallbackExpenseCategoryId(companyCats)) {
+      return res.status(400).json({
+        error: 'Cadastre ao menos uma categoria de despesa nesta empresa antes de lançar itens do documento.',
+      });
+    }
 
     const { data: existingPay } = await supabase
       .from('payables')
@@ -465,12 +650,57 @@ router.post('/:companyId/:documentId/launch-items',
     }
 
     const docData = doc.gemini_data || {};
+    const matchOptsLaunch = {
+      preferTypes: ['despesa', 'ambos'],
+      deemphasizeTaxExpenseCategories: true,
+      excludeComprasFreteForStockLines: true,
+    };
     let resolvedCategoryId = categoryIdIfAllowed(categoryId, companyCats) || categoryIdIfAllowed(doc.category_id, companyCats);
-    if (!resolvedCategoryId && docData.suggested_category) {
-      resolvedCategoryId = matchCompanyCategoryId(companyCats, docData.suggested_category, { preferTypes: ['despesa', 'ambos'] });
+    if (!resolvedCategoryId && Array.isArray(docData.items) && docData.items.length) {
+      for (const it of docData.items) {
+        const ref = it.ncm_category_reference != null && String(it.ncm_category_reference).trim() !== ''
+          ? String(it.ncm_category_reference).trim()
+          : null;
+        if (ref) {
+          const mid = matchCompanyCategoryId(companyCats, ref, matchOptsLaunch);
+          if (mid) {
+            resolvedCategoryId = mid;
+            break;
+          }
+        }
+        const catLab = it.category != null && String(it.category).trim() !== '' ? String(it.category).trim() : null;
+        if (catLab) {
+          const mid = matchCompanyCategoryId(companyCats, catLab, matchOptsLaunch);
+          if (mid) {
+            resolvedCategoryId = mid;
+            break;
+          }
+        }
+        const lineCtx0 = [
+          docData.supplier_name,
+          it.description,
+          it.desc,
+          it.ncm ? `NCM ${String(it.ncm).replace(/\D/g, '')}` : null,
+        ]
+          .filter((x) => x != null && String(x).trim() !== '')
+          .join(' | ');
+        if (lineCtx0.trim()) {
+          const mid = matchCompanyCategoryId(companyCats, lineCtx0, matchOptsLaunch);
+          if (mid) {
+            resolvedCategoryId = mid;
+            break;
+          }
+        }
+      }
+    }
+    if (!resolvedCategoryId && docData.suggested_category != null && docData.suggested_category !== '') {
+      const sugId = matchCompanyCategoryId(companyCats, String(docData.suggested_category), matchOptsLaunch);
+      if (sugId && !(categoryIdIsComprasOuFreteGenerico(companyCats, sugId) && docItemsSuggestRetailStock(docData))) {
+        resolvedCategoryId = sugId;
+      }
     }
 
-    const due = confirmedDate || docData.due_date || docData.issue_date || new Date().toISOString().split('T')[0];
+    const due = dueDateForPayable(confirmedDate, docData, doc.detected_date);
     const supplier = docData.supplier_name || doc.supplier_name || doc.file_name;
     const docType = (docData.doc_type || doc.doc_type || 'DOC').toUpperCase();
     const docLevelPayment = docData.payment_method || null;
@@ -483,25 +713,66 @@ router.post('/:companyId/:documentId/launch-items',
       return Math.round(totalDiscount * (gross / itemGrossSumFull) * 100) / 100;
     };
 
+    const baseLaunchItems = userItems.map((it, idx) => ({
+      ...it,
+      ncm: it.ncm ?? docData.items?.[idx]?.ncm ?? null,
+    }));
+    let launchLineItems = baseLaunchItems;
+    try {
+      const enriched = await enrichGeminiDocItemsWithNcmReference({ items: baseLaunchItems });
+      launchLineItems = Array.isArray(enriched?.items) ? enriched.items : baseLaunchItems;
+    } catch (ncmErr) {
+      logger.warn('launch-items: enriquecimento NCM ignorado:', ncmErr.message);
+    }
+
     const payables = [];
-    for (const item of userItems) {
+    for (const item of launchLineItems) {
       let itemCategoryId = resolvedCategoryId;
-      const explicitCat = categoryIdIfAllowed(item.category_id, companyCats) || categoryIdIfAllowed(item.catId, companyCats);
+      const explicitCat = categoryIdIfAllowed(item.catId, companyCats)
+        || categoryIdIfAllowed(item.categoryId, companyCats)
+        || categoryIdIfAllowed(item.category_id, companyCats);
       if (explicitCat) {
         itemCategoryId = explicitCat;
       } else {
+        if (item.ncm_category_reference) {
+          const mid = matchCompanyCategoryId(companyCats, String(item.ncm_category_reference), matchOptsLaunch);
+          if (mid) itemCategoryId = mid;
+        }
         const catName = item.category || item.catName;
-        if (catName) {
-          const mid = matchCompanyCategoryId(companyCats, String(catName), { preferTypes: ['despesa', 'ambos'] });
+        if (!itemCategoryId && catName) {
+          const mid = matchCompanyCategoryId(companyCats, String(catName), matchOptsLaunch);
           if (mid) itemCategoryId = mid;
         }
         if (!itemCategoryId && (item.description || item.desc)) {
-          const mid = matchCompanyCategoryId(companyCats, String(item.description || item.desc), { preferTypes: ['despesa', 'ambos'] });
+          const lineCtx = [
+            docData.supplier_name,
+            item.description || item.desc,
+            item.ncm ? `NCM ${String(item.ncm).replace(/\D/g, '')}` : null,
+            item.ncm_category_reference,
+            catName,
+          ]
+            .filter((x) => x != null && String(x).trim() !== '')
+            .join(' | ');
+          const mid = matchCompanyCategoryId(companyCats, lineCtx, matchOptsLaunch);
           if (mid) itemCategoryId = mid;
         }
-        if (!itemCategoryId && docData.suggested_category) {
-          const mid = matchCompanyCategoryId(companyCats, String(docData.suggested_category), { preferTypes: ['despesa', 'ambos'] });
-          if (mid) itemCategoryId = mid;
+        if (!itemCategoryId && docData.suggested_category != null && docData.suggested_category !== '') {
+          const lineCtxSug = [
+            docData.supplier_name,
+            item.description || item.desc,
+            item.ncm ? `NCM ${String(item.ncm).replace(/\D/g, '')}` : null,
+            item.ncm_category_reference,
+            catName,
+          ]
+            .filter((x) => x != null && String(x).trim() !== '')
+            .join(' | ');
+          const mid = matchCompanyCategoryId(companyCats, String(docData.suggested_category), matchOptsLaunch);
+          if (
+            mid
+            && !(categoryIdIsComprasOuFreteGenerico(companyCats, mid) && labelLooksLikeRetailStockLine(lineCtxSug))
+          ) {
+            itemCategoryId = mid;
+          }
         }
       }
 
@@ -518,7 +789,7 @@ router.post('/:companyId/:documentId/launch-items',
         .from('payables')
         .insert({
           company_id:       req.companyId,
-          category_id:      categoryIdIfAllowed(itemCategoryId, companyCats),
+          category_id:      payableCategoryIdOrFallback(itemCategoryId, companyCats),
           description:      (docType + ' — ' + supplier + ' | ' + desc).slice(0, 300),
           amount:           itemNet,
           due_date:         due,
@@ -680,7 +951,7 @@ router.patch('/:companyId/:id/confirm',
         category_id: safeCat,
         description: `${(doc.doc_type||'DOC').toUpperCase()} — ${doc.supplier_name || doc.file_name}`,
         amount:      confirmedValue || doc.detected_value,
-        due_date:    confirmedDate || doc.detected_date || new Date().toISOString().split('T')[0],
+        due_date:    dueDateForPayable(confirmedDate, doc.gemini_data || {}, doc.detected_date),
         origin:      'document',
         origin_id:   doc.id,
         status:      'open',
@@ -709,6 +980,112 @@ router.patch('/:companyId/:id/confirm',
 
     res.json({ message: 'Documento lançado com sucesso', payable });
   }
+);
+
+// PATCH /api/documents/:companyId/:documentId/payables/:payableId/category
+// Altera só a categoria de um título gerado pelo documento (permissão docs).
+router.patch('/:companyId/:documentId/payables/:payableId/category',
+  authenticate, requireCompanyAccess, requirePermission('docs'),
+  async (req, res) => {
+    const { documentId, payableId } = req.params;
+    const { categoryId } = req.body;
+
+    const { data: p, error: pe } = await supabase
+      .from('payables')
+      .select('id, origin, origin_id, status')
+      .eq('id', payableId)
+      .eq('company_id', req.companyId)
+      .maybeSingle();
+    if (pe || !p) return res.status(404).json({ error: 'Título não encontrado' });
+    if (p.origin !== 'document' || String(p.origin_id) !== String(documentId)) {
+      return res.status(400).json({ error: 'Este título não pertence ao documento indicado.' });
+    }
+    if (p.status === 'paid') {
+      return res.status(400).json({ error: 'Título pago: altere a categoria em Contas a Pagar se necessário.' });
+    }
+
+    const { data: clsCats } = await supabase
+      .from('categories')
+      .select('id')
+      .or(`company_id.eq.${req.companyId},company_id.is.null`)
+      .eq('active', true);
+    const safe = categoryIdIfAllowed(categoryId, clsCats || []);
+
+    const { error } = await supabase
+      .from('payables')
+      .update({ category_id: safe })
+      .eq('id', payableId)
+      .eq('company_id', req.companyId);
+    if (error) return res.status(400).json({ error: error.message });
+
+    await supabase.from('access_logs').insert({
+      user_id: req.user.id,
+      company_id: req.companyId,
+      action: `Categoria do título ${payableId} (documento ${documentId}) ajustada`,
+      module: 'docs',
+      details: { payableId, documentId, category_id: safe },
+    });
+
+    res.json({ message: 'Categoria atualizada', category_id: safe });
+  },
+);
+
+// PATCH /api/documents/:companyId/:documentId/gemini-items
+// Atualiza category_id / rótulo nos itens do JSON (documento ainda pendente).
+router.patch('/:companyId/:documentId/gemini-items',
+  authenticate, requireCompanyAccess, requirePermission('docs'),
+  async (req, res) => {
+    const { documentId } = req.params;
+    const { items } = req.body;
+    if (!Array.isArray(items) || !items.length) {
+      return res.status(400).json({ error: 'Informe items: array de { index, category_id }' });
+    }
+
+    const { data: doc, error: dErr } = await supabase
+      .from('client_documents')
+      .select('id, gemini_data, status, payable_id')
+      .eq('id', documentId)
+      .eq('company_id', req.companyId)
+      .single();
+    if (dErr || !doc) return res.status(404).json({ error: 'Documento não encontrado' });
+    const st = String(doc.status || '').toLowerCase();
+    if (doc.payable_id || ['posted', 'auto_posted', 'lancado'].includes(st)) {
+      return res.status(400).json({ error: 'Documento já lançado — edite a categoria em cada título (expandir itens).' });
+    }
+
+    const { data: catRows } = await supabase
+      .from('categories')
+      .select('id, name')
+      .or(`company_id.eq.${req.companyId},company_id.is.null`)
+      .eq('active', true);
+    const catList = catRows || [];
+
+    const gem = doc.gemini_data && typeof doc.gemini_data === 'object' ? { ...doc.gemini_data } : {};
+    const arr = Array.isArray(gem.items) ? [...gem.items] : [];
+
+    for (const row of items) {
+      const idx = Number(row.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= arr.length) continue;
+      const allowedCat = categoryIdIfAllowed(row.category_id, catList);
+      const catRow = allowedCat ? catList.find((c) => String(c.id) === String(allowedCat)) : null;
+      const next = { ...arr[idx] };
+      if (allowedCat) {
+        next.category_id = allowedCat;
+        if (catRow?.name) next.category = catRow.name;
+      }
+      arr[idx] = next;
+    }
+    gem.items = arr;
+
+    const { error } = await supabase
+      .from('client_documents')
+      .update({ gemini_data: jsonSafeForPostgres(gem) })
+      .eq('id', documentId)
+      .eq('company_id', req.companyId);
+    if (error) return res.status(400).json({ error: error.message });
+
+    res.json({ message: 'Itens atualizados', gemini_data: gem });
+  },
 );
 
 // POST /api/documents/:companyId/drive-scan

@@ -18,8 +18,17 @@ function bankCategoryHint(description, amount) {
   const outRules = [
     { re: /salari|folha pag|folha de|funcionari|clt|rescis|ferias pag/, hint: 'Salários' },
     { re: /pro[- ]?labore|prolabore/, hint: 'Pró-labore' },
-    { re: /fgts|inss|previd|darf.*prev|gps/, hint: 'FGTS / INSS' },
-    { re: /simples|darf|gps|imposto|tribut|federal|prefeit|iss |iptu|itbi|iof/, hint: 'Impostos / Taxas' },
+    { re: /fgts|inss|previd|darf.*prev|\bgps\b(?!\s*de)/, hint: 'FGTS / INSS' },
+    /* Evite “imposto” solto (corta falso positivo em textos de fornecedor). */
+    {
+      re: /simples nacional|\bdarf\b|\bgps\b|guias?|imposto\b|tribut(o|ação)|\biss\b|iptu|itbi|\biof\b|prefeitur|sefaz|rfb|receita federal|parcelamento|parcela impost/i,
+      hint: 'Impostos / Taxas',
+    },
+    /* Bebidas / grandes marcas — antes de “frete” e “compras genéricas”. */
+    {
+      re: /\b(coca[\s\-]?cola|pepsico|pepsi\b|fanta|sprite|schweppes|guaran[aá]|kuat|dolly|ituba|sukita|ambev|heineken|brahma|skol|itaipava|petropolis|muller|red bull|monster|distribuidor(a)?\s+de\s+bebidas?|bebidas?\s+e\s*refriger|refrigerantes?\b)/i,
+      hint: 'Refrigerantes bebidas água CMV mercadoria',
+    },
     { re: /energia|eletric|luz |cemig|cpfl|enel|light|copel|equatorial/, hint: 'Energia Elétrica' },
     { re: /\bagua\b|sabesp|cedae|copasa|sanepar/, hint: 'Água' },
     { re: /internet|telefon|vivo|claro|tim |oi fibra|netflix|spotify|assinatura/, hint: 'Internet / Telefone' },
@@ -28,12 +37,22 @@ function bankCategoryHint(description, amount) {
     { re: /tarifa|taxa banc|cesta de|manutencao conta|iof operac/, hint: 'Despesas Financeiras' },
     { re: /marketing|google ads|facebook ads|meta ads|publicidade/, hint: 'Marketing / Publicidade' },
     { re: /manutencao|conserto|peca|oficina/, hint: 'Manutenção' },
-    { re: /supermercado|atacad(o|ista)|mercadoria|distribuidor|fornecedor.*(nf|nota|boleto)/, hint: 'Compras de Mercadoria' },
-    { re: /boleto\s+(pag|pago)|transferencia\s+enviad|pix\s+enviad|ted\s+enviad|doc\s+pag/, hint: 'Compras de Mercadoria' },
+    /* Só “compras de mercadoria” com evidência de fornecimento de mercadoria — evita rotular todo PIX/boleto genérico. */
+    {
+      re: /supermercado|atacad(o|ista)|mercadoria|cmv|custo mercad|insumo|revenda|estoque|fornecedor.*(nf|nota fiscal|nfe|danfe)/i,
+      hint: 'Compras de Mercadoria',
+    },
+    {
+      re: /frete|transportadora|transporte|logistica|correios|sedex|jadlog|total express|rte\.?\s*rodovi|coleta|entrega|armazenagem/i,
+      hint: 'Frete e transporte',
+    },
   ];
 
   const inRules = [
     { re: /pix receb|ted receb|doc receb|transferencia receb|credito em conta|deposito/, hint: 'Vendas à Vista' },
+    { re: /ifood/, hint: 'Receita comercial - iFood' },
+    { re: /rappi/, hint: 'Receita comercial - Rappi' },
+    { re: /uber\s*eats/, hint: 'Receita comercial - Uber Eats' },
     { re: /venda|recebimento cliente|nfce|cupom fiscal/, hint: 'Vendas à Vista' },
     { re: /juros receb|rendimento cdb|dividend/, hint: 'Juros Recebidos' },
     { re: /servico prest|nota fiscal de servico.*tomador/, hint: 'Serviços Prestados' },

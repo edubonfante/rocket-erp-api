@@ -1,21 +1,5 @@
 require('dotenv').config();
 const express = require('express');
-const cors    = require('cors');
-const helmet  = require('helmet');
-const rateLimit = require('express-rate-limit');
-
-const authRoutes      = require('./routes/auth');
-const companyRoutes   = require('./routes/companies');
-const nfeRoutes       = require('./routes/nfe');
-const payableRoutes   = require('./routes/payables');
-const salesRoutes     = require('./routes/sales');
-const bankRoutes      = require('./routes/bank');
-const docRoutes       = require('./routes/documents');
-const reportRoutes    = require('./routes/reports');
-const userRoutes      = require('./routes/users');
-const logRoutes       = require('./routes/logs');
-
-const { errorHandler } = require('./middlewares/errorHandler');
 const logger = require('./utils/logger');
 
 process.on('unhandledRejection', (reason) => {
@@ -26,84 +10,39 @@ process.on('uncaughtException', (err) => {
 });
 
 const app = express();
-const PORT = process.env.PORT || 3001;
-
-/* Atrás de Firebase Hosting / Cloud Run / Railway o IP visto é o do proxy — necessário p/ rate-limit e logs. */
 app.set('trust proxy', 1);
 
-// ── Segurança ──
-app.use(helmet());
+const portStr = String(process.env.PORT ?? '').trim();
+const parsed = parseInt(portStr, 10);
+const PORT = Number.isFinite(parsed) && parsed > 0 ? parsed : 3001;
+const LISTEN_HOST = (process.env.LISTEN_HOST || '0.0.0.0').trim() || '0.0.0.0';
 
-const DEFAULT_CORS = [
-  'http://localhost:5173',
-  'http://localhost:3000',
-  'http://127.0.0.1:5173',
-  /* Site do firebase.json (ajuste se mudar o projeto Firebase) */
-  'https://rocketrocket-64c29.web.app',
-  'https://rocketrocket-64c29.firebaseapp.com',
-];
+const healthHandler = (req, res) => res.json({ status: 'ok', ts: new Date() });
+app.get('/health', healthHandler);
+app.get('/api/health', healthHandler);
 
-function corsOriginList() {
-  const extra = (process.env.ALLOWED_ORIGINS || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return [...new Set([...DEFAULT_CORS, ...extra])];
-}
-
-app.use(cors({
-  origin(origin, cb) {
-    const allowed = corsOriginList();
-    if (!origin) return cb(null, true);
-    if (allowed.includes(origin)) return cb(null, true);
-    return cb(null, false);
-  },
-  credentials: true,
-}));
-
-// ── Rate limit global ──
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
-  max: 300,
-  message: { error: 'Muitas requisições. Tente novamente em 15 minutos.' }
-}));
-
-// ── Rate limit agressivo no login ──
-app.use('/api/auth/login', rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: { error: 'Muitas tentativas de login.' }
-}));
-
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-
-// ── Health check ──
-app.get('/health', (req, res) => res.json({ status: 'ok', ts: new Date() }));
-
-// ── Rotas ──
-app.use('/api/auth',      authRoutes);
-app.use('/api/companies', companyRoutes);
-app.use('/api/nfe',       nfeRoutes);
-app.use('/api/payables',  payableRoutes);
-app.use('/api/sales',     salesRoutes);
-app.use('/api/bank',      bankRoutes);
-app.use('/api/documents', docRoutes);
-app.use('/api/reports',   reportRoutes);
-app.use('/api/users',     userRoutes);
-app.use('/api/logs',      logRoutes);
-
-// ── 404 ──
-app.use((req, res) => res.status(404).json({ error: 'Rota não encontrada' }));
-
-// ── Error handler ──
-app.use(errorHandler);
-
-const server = app.listen(PORT, () => {
-  logger.info(`🚀 Rocket ERP API rodando na porta ${PORT} [${process.env.NODE_ENV}]`);
+const server = app.listen(PORT, LISTEN_HOST, () => {
+  logger.info(`Rocket ERP API em http://${LISTEN_HOST}:${PORT} [${process.env.NODE_ENV || 'undefined'}]`);
 });
 
-/* Proxies (Railway, etc.): evita socket fechado em requests longos (ex.: Gemini + upload). */
+/* Deferir: se o require() das rotas rodar na mesma volta síncrona do listen(), o bind atrasa e o health check do Cloud Run falha. */
+setImmediate(() => {
+  try {
+    require('./bootstrapApp')(app);
+  } catch (err) {
+    logger.error('Falha ao carregar rotas', { message: err.message, stack: err.stack });
+    /* Não dar process.exit(1): derruba a revisão no Cloud Run (503 em loop). Sem Supabase nas env vars é esperado até configurar. */
+    app.use((req, res) => {
+      res.status(503).json({
+        error: 'API não inicializada',
+        detail: String(err.message),
+        hint:
+          'No Google Cloud Run → serviço rocket-erp-api → Editar e implantar → Variáveis: defina SUPABASE_URL, SUPABASE_SERVICE_KEY e JWT_SECRET (mesmos valores do backend/.env). Depois dispare uma nova revisão.',
+      });
+    });
+  }
+});
+
 server.keepAliveTimeout = 75000;
 server.headersTimeout = 95000;
 server.timeout = 180000;

@@ -3,6 +3,15 @@ const supabase   = require('../db');
 const gemini     = require('./geminiReader');
 const salesImporter = require('./salesImporter');
 const logger     = require('../utils/logger');
+const {
+  matchCompanyCategoryId,
+  categoryIdIsComprasOuFreteGenerico,
+  docItemsSuggestRetailStock,
+} = require('../utils/categoryMatch');
+const {
+  enrichGeminiDocItemsWithNcmReference,
+  applyDominantCategoryFromItems,
+} = require('./ncmCategoryLookup');
 
 /**
  * Serviço de monitoramento do Google Drive.
@@ -107,21 +116,62 @@ class DriveMonitor {
 
       const fileUrl = supabase.storage.from('rocket-erp-docs').getPublicUrl(storagePath).data.publicUrl;
 
-      // Lê com Gemini
-      const geminiResult = await gemini.readDocument(buffer, file.mimeType);
+      const { data: driveCatsRaw } = await supabase
+        .from('categories')
+        .select('id,name,type,company_id')
+        .or(`company_id.eq.${company.id},company_id.is.null`)
+        .eq('active', true);
+      const driveCats = driveCatsRaw || [];
+      const expenseNames = driveCats
+        .filter((c) => !c.type || ['despesa', 'ambos'].includes(c.type))
+        .map((c) => c.name);
 
-      const docData = geminiResult.success ? geminiResult.data : {};
+      // Lê com Gemini (prompt alinhado ao plano de contas da empresa)
+      const geminiResult = await gemini.readDocument(buffer, file.mimeType, file.name, {
+        expenseCategoryNames: expenseNames,
+      });
 
-      // Busca categoria correspondente
+      let docData = geminiResult.success ? geminiResult.data : {};
+      try {
+        docData = applyDominantCategoryFromItems(
+          await enrichGeminiDocItemsWithNcmReference(docData),
+        );
+      } catch (e) {
+        logger.warn('DriveMonitor: enriquecimento NCM ignorado:', e.message);
+      }
+
+      const driveMatchOpts = {
+        preferTypes: ['despesa', 'ambos'],
+        deemphasizeTaxExpenseCategories: true,
+        excludeComprasFreteForStockLines: true,
+      };
       let categoryId = null;
-      if (docData.suggested_category) {
-        const { data: cat } = await supabase
-          .from('categories')
-          .select('id')
-          .eq('company_id', company.id)
-          .ilike('name', `%${docData.suggested_category}%`)
-          .single();
-        categoryId = cat?.id;
+      if (Array.isArray(docData.items) && docData.items.length) {
+        for (const it of docData.items) {
+          const ref = it.ncm_category_reference != null && String(it.ncm_category_reference).trim() !== ''
+            ? String(it.ncm_category_reference).trim()
+            : null;
+          if (ref) {
+            const mid = matchCompanyCategoryId(driveCats, ref, driveMatchOpts);
+            if (mid) {
+              categoryId = mid;
+              break;
+            }
+          }
+          if (it.category) {
+            const mid = matchCompanyCategoryId(driveCats, String(it.category), driveMatchOpts);
+            if (mid) {
+              categoryId = mid;
+              break;
+            }
+          }
+        }
+      }
+      if (!categoryId && docData.suggested_category != null && String(docData.suggested_category).trim() !== '') {
+        const sugId = matchCompanyCategoryId(driveCats, String(docData.suggested_category), driveMatchOpts);
+        if (sugId && !(categoryIdIsComprasOuFreteGenerico(driveCats, sugId) && docItemsSuggestRetailStock(docData))) {
+          categoryId = sugId;
+        }
       }
 
       // Insere documento no banco

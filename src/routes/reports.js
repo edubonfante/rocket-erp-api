@@ -1,6 +1,9 @@
 const router   = require('express').Router();
 const supabase = require('../db');
 const { authenticate, requireCompanyAccess, requirePermission } = require('../middlewares/auth');
+const { classifyPayableForDre } = require('../utils/dreAnalyticMap');
+const { computeDre } = require('../utils/dreCompute');
+const { buildDreXlsxBuffer } = require('../utils/dreXlsxBuffer');
 
 // ── helpers ──
 const fmt = (v) => Math.round((v || 0) * 100) / 100;
@@ -208,66 +211,226 @@ router.get('/:companyId/cmv',
   }
 );
 
+// GET /api/reports/:companyId/dre/drill — detalhe por “caixa” da DRE (vendas, extrato receita, contas a pagar)
+router.get('/:companyId/dre/drill',
+  authenticate, requireCompanyAccess, requirePermission('dre'),
+  async (req, res) => {
+    const { bucket, dateFrom, dateTo, categoryId } = req.query;
+    const lim = Math.min(500, Math.max(1, parseInt(String(req.query.limit || '80'), 10) || 80));
+    const off = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
+    const df = dateFrom || '2000-01-01';
+    const dt = dateTo || '2099-12-31';
+    const catFilter = categoryId && String(categoryId).trim() ? String(categoryId).trim() : null;
+
+    const allowed = new Set([
+      'receita_bruta',
+      'devolucoes',
+      'impostos_vendas',
+      'cmv',
+      'pessoal',
+      'admin',
+      'depreciacao',
+      'financeiras',
+      'irpj',
+    ]);
+    if (!bucket || !allowed.has(String(bucket))) {
+      return res.status(400).json({ error: 'Parâmetro bucket inválido ou ausente' });
+    }
+
+    const mapPayableRow = (p) => ({
+      kind: 'payable',
+      id: p.id,
+      date: p.due_date,
+      description: p.description,
+      category: p.categories?.name || null,
+      supplier: p.suppliers?.name || null,
+      amount: fmt(parseFloat(p.amount)),
+      status: p.status,
+      origin: p.origin,
+    });
+
+    try {
+      if (bucket === 'depreciacao') {
+        return res.json({
+          bucket,
+          total: 0,
+          rows: [],
+          note: 'Depreciação na DRE é estimativa (percentual); não há lançamentos individuais aqui.',
+        });
+      }
+
+      if (bucket === 'receita_bruta') {
+        let qs = supabase
+          .from('sales')
+          .select('id, sale_date, gross_value, discount, net_value, payment_method, cancelled, categories(name)')
+          .eq('company_id', req.companyId)
+          .eq('cancelled', false)
+          .gte('sale_date', df)
+          .lte('sale_date', dt);
+        if (catFilter) qs = qs.eq('category_id', catFilter);
+        const { data: saleRows, error: sErr } = await qs.order('sale_date', { ascending: false }).limit(2500);
+        if (sErr) return res.status(500).json({ error: sErr.message });
+
+        let qb = supabase
+          .from('bank_entries')
+          .select('id, entry_date, description, amount, status, categories(name, type)')
+          .eq('company_id', req.companyId)
+          .eq('status', 'classified')
+          .not('category_id', 'is', null)
+          .gt('amount', 0)
+          .gte('entry_date', df)
+          .lte('entry_date', dt);
+        if (catFilter) qb = qb.eq('category_id', catFilter);
+        const { data: bankRows, error: bErr } = await qb.order('entry_date', { ascending: false }).limit(2500);
+        if (bErr) return res.status(500).json({ error: bErr.message });
+
+        const merged = [];
+        for (const r of saleRows || []) {
+          merged.push({
+            kind: 'sale',
+            id: r.id,
+            date: r.sale_date,
+            description: `${r.payment_method || '—'} · venda importada`,
+            category: r.categories?.name || null,
+            amount: fmt(parseFloat(r.gross_value)),
+            payment_method: r.payment_method,
+            cancelled: r.cancelled,
+          });
+        }
+        for (const b of bankRows || []) {
+          const ty = String(b.categories?.type || '');
+          if (ty !== 'receita' && ty !== 'ambos') continue;
+          merged.push({
+            kind: 'bank_entry',
+            id: b.id,
+            date: b.entry_date,
+            description: b.description || 'Entrada no extrato',
+            category: b.categories?.name || null,
+            amount: fmt(parseFloat(b.amount)),
+            status: b.status,
+            origin: 'conciliacao',
+          });
+        }
+        merged.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+        const total = merged.length;
+        const slice = merged.slice(off, off + lim);
+        return res.json({
+          bucket,
+          total,
+          rows: slice,
+          offset: off,
+          limit: lim,
+          note: total >= 5000 ? 'Lista limitada a 5000 lançamentos mais recentes para desempenho.' : null,
+        });
+      }
+
+      if (bucket === 'devolucoes') {
+        let qs = supabase
+          .from('sales')
+          .select('id, sale_date, gross_value, discount, net_value, payment_method, cancelled, categories(name)')
+          .eq('company_id', req.companyId)
+          .gte('sale_date', df)
+          .lte('sale_date', dt)
+          .or('cancelled.eq.true,discount.gt.0');
+        if (catFilter) qs = qs.eq('category_id', catFilter);
+        const { data: saleRows, error: sErr } = await qs.order('sale_date', { ascending: false }).limit(2500);
+        if (sErr) return res.status(500).json({ error: sErr.message });
+
+        const { data: payRows, error: pErr } = await supabase
+          .from('payables')
+          .select('id, description, amount, due_date, status, origin, category_id, categories(id,name,account_code,type), suppliers(name)')
+          .eq('company_id', req.companyId)
+          .in('status', ['open', 'overdue', 'paid'])
+          .gte('due_date', df)
+          .lte('due_date', dt)
+          .order('due_date', { ascending: false })
+          .limit(4000);
+        if (pErr) return res.status(500).json({ error: pErr.message });
+
+        const merged = [];
+        for (const r of saleRows || []) {
+          merged.push({
+            kind: 'sale',
+            id: r.id,
+            date: r.sale_date,
+            description: r.cancelled ? 'Cancelamento / estorno' : 'Desconto na venda',
+            category: r.categories?.name || null,
+            amount: fmt(parseFloat(r.discount || 0) + (r.cancelled ? parseFloat(r.net_value || 0) : 0)),
+            payment_method: r.payment_method,
+            cancelled: r.cancelled,
+          });
+        }
+        for (const p of payRows || []) {
+          if (classifyPayableForDre(p.categories).drillBucket !== 'devolucoes') continue;
+          if (catFilter && String(p.category_id) !== catFilter) continue;
+          merged.push(mapPayableRow(p));
+        }
+        merged.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+        const total = merged.length;
+        const slice = merged.slice(off, off + lim);
+        return res.json({ bucket, total, rows: slice, offset: off, limit: lim });
+      }
+
+      const { data: payRows, error: pErr } = await supabase
+        .from('payables')
+        .select(
+          'id, description, amount, due_date, status, origin, category_id, categories(id,name,account_code,type), suppliers(name)',
+        )
+        .eq('company_id', req.companyId)
+        .in('status', ['open', 'overdue', 'paid'])
+        .gte('due_date', df)
+        .lte('due_date', dt)
+        .order('due_date', { ascending: false })
+        .limit(6000);
+
+      if (pErr) return res.status(500).json({ error: pErr.message });
+
+      const wantBucket = String(bucket);
+      const filtered = (payRows || []).filter((p) => {
+        if (catFilter && String(p.category_id) !== catFilter) return false;
+        return classifyPayableForDre(p.categories).drillBucket === wantBucket;
+      });
+      const total = filtered.length;
+      const slice = filtered.slice(off, off + lim);
+      const rows = slice.map(mapPayableRow);
+
+      return res.json({ bucket, total, rows, offset: off, limit: lim });
+    } catch (e) {
+      return res.status(500).json({ error: e.message || 'Erro no drill-down' });
+    }
+  }
+);
+
+// GET /api/reports/:companyId/dre/export — DRE em .xlsx (ExcelJS no servidor)
+router.get('/:companyId/dre/export',
+  authenticate, requireCompanyAccess, requirePermission('dre'),
+  async (req, res) => {
+    try {
+      const { dateFrom, dateTo } = req.query;
+      const d = await computeDre(supabase, req.companyId, dateFrom, dateTo);
+      const buffer = await buildDreXlsxBuffer(d, dateFrom || '', dateTo || '');
+      const safe = (s) => String(s || '').replace(/[^\d-]/g, '') || 'x';
+      const fn = `dre_${safe(dateFrom)}_${safe(dateTo)}.xlsx`;
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${fn}"`);
+      res.send(Buffer.from(buffer));
+    } catch (e) {
+      res.status(500).json({ error: e.message || 'Erro ao gerar Excel' });
+    }
+  }
+);
+
 // GET /api/reports/:companyId/dre — DRE
 router.get('/:companyId/dre',
   authenticate, requireCompanyAccess, requirePermission('dre'),
   async (req, res) => {
-    const { dateFrom, dateTo } = req.query;
-
-    const { data: sales } = await supabase
-      .from('sales').select('net_value, gross_value, discount').eq('company_id', req.companyId)
-      .eq('cancelled', false).gte('sale_date', dateFrom||'2000-01-01').lte('sale_date', dateTo||'2099-12-31');
-
-    const { data: payables } = await supabase
-      .from('payables').select('amount, categories(name, type)')
-      .eq('company_id', req.companyId).in('status',['open','overdue','paid'])
-      .gte('due_date', dateFrom||'2000-01-01').lte('due_date', dateTo||'2099-12-31');
-
-    const grossRevenue    = fmt(sales?.reduce((s,r) => s + parseFloat(r.gross_value), 0) || 0);
-    const totalDiscount   = fmt(sales?.reduce((s,r) => s + parseFloat(r.discount||0), 0) || 0);
-    const netRevenue      = fmt(grossRevenue - totalDiscount);
-
-    // Classifica despesas por categoria
-    const expenses = {};
-    for (const p of (payables||[])) {
-      const cat = p.categories?.name || 'Outros';
-      expenses[cat] = (expenses[cat] || 0) + parseFloat(p.amount);
+    try {
+      const { dateFrom, dateTo } = req.query;
+      const d = await computeDre(supabase, req.companyId, dateFrom, dateTo);
+      res.json(d);
+    } catch (e) {
+      res.status(500).json({ error: e.message || 'Erro ao montar DRE' });
     }
-
-    const cmv        = fmt(expenses['Compras de Mercadoria'] || expenses['Matéria-Prima'] || netRevenue * 0.47);
-    const grossProfit = fmt(netRevenue - cmv);
-
-    const personnel  = fmt((expenses['Despesas com Pessoal'] || 0) + (expenses['Salários'] || 0) + (expenses['Pró-labore'] || 0));
-    const admin      = fmt(Object.entries(expenses).filter(([k]) => !['Compras de Mercadoria','Despesas com Pessoal','Salários','Pró-labore','Impostos / Taxas','Simples Nacional'].includes(k)).reduce((s,[,v]) => s+v, 0));
-    const taxes      = fmt((expenses['Impostos / Taxas'] || 0) + (expenses['Simples Nacional'] || 0) + (expenses['IRPJ / CSLL'] || 0));
-    const deprec     = fmt(grossProfit * 0.03);
-    const ebitda     = fmt(grossProfit - personnel - admin - deprec);
-    const finExp     = fmt(ebitda * 0.04);
-    const lair       = fmt(ebitda - finExp);
-    const irpj       = fmt(lair * 0.04);
-    const netProfit  = fmt(lair - irpj);
-    const pct = (v) => netRevenue > 0 ? fmt((v / netRevenue) * 100) : 0;
-
-    res.json({
-      gross_revenue:  grossRevenue,
-      discounts:      totalDiscount,
-      taxes_on_sales: taxes,
-      net_revenue:    netRevenue,
-      cmv,
-      gross_profit:   grossProfit,
-      gross_margin:   pct(grossProfit),
-      personnel,
-      admin_expenses: admin,
-      depreciation:   deprec,
-      ebitda,
-      ebitda_margin:  pct(ebitda),
-      financial_exp:  finExp,
-      lair,
-      irpj,
-      net_profit:     netProfit,
-      net_margin:     pct(netProfit),
-      expenses_detail: Object.entries(expenses).map(([name, amount]) => ({ name, amount: fmt(amount), pct: pct(amount) })),
-    });
   }
 );
 

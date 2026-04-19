@@ -237,16 +237,10 @@ router.post('/:companyId/upload-xml',
 );
 
 
-// Busca categoria pelo NCM do item
+const { lookupNcmCategoryName: lookupNcmCategoryNameFromTable } = require('../services/ncmCategoryLookup');
+
 async function getCategoryByNCM(ncmCode) {
-  if (!ncmCode) return null;
-  const prefix = ncmCode.replace(/\D/g, '').slice(0, 4);
-  const { data } = await supabase
-    .from('ncm_categories')
-    .select('category_name')
-    .like('ncm_code', prefix + '%')
-    .limit(1);
-  return data?.[0]?.category_name || null;
+  return lookupNcmCategoryNameFromTable(ncmCode);
 }
 
 module.exports = router;

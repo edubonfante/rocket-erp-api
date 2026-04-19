@@ -16,17 +16,34 @@ router.post('/login', [
   if (!errors.isEmpty())
     return res.status(400).json({ errors: errors.array() });
 
-  const email = String(req.body.email || '').trim();
+  const emailRaw = String(req.body.email || '').trim();
+  const emailLower = emailRaw.toLowerCase();
   const { password } = req.body;
 
   try {
-    const { data: user, error } = await supabase
+    // Cadastro (POST /users) grava email em minúsculas; login precisa bater no mesmo valor.
+    let { data: user, error } = await supabase
       .from('users')
       .select('id, name, email, role, password_hash, active')
-      .eq('email', email)
-      .single();
+      .eq('email', emailLower)
+      .maybeSingle();
 
-    if (error || !user || !user.active)
+    if (!user && emailRaw !== emailLower) {
+      const second = await supabase
+        .from('users')
+        .select('id, name, email, role, password_hash, active')
+        .eq('email', emailRaw)
+        .maybeSingle();
+      user = second.data;
+      error = second.error;
+    }
+
+    if (error && error.code !== 'PGRST116') {
+      logger.error('Login Supabase:', error);
+      return res.status(500).json({ error: 'Erro ao validar login. Tente novamente.' });
+    }
+
+    if (!user || !user.active)
       return res.status(401).json({ error: 'Credenciais inválidas' });
 
     const valid = await bcrypt.compare(password, user.password_hash);
@@ -75,7 +92,7 @@ router.post('/login', [
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
 
-    logger.info(`Login: ${email} [${user.role}]`);
+    logger.info(`Login: ${user.email} [${user.role}]`);
 
     res.json({
       token,

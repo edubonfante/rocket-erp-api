@@ -3,7 +3,30 @@ const multer   = require('multer');
 const supabase = require('../db');
 const importer = require('../services/salesImporter');
 const { authenticate, requireCompanyAccess, requirePermission } = require('../middlewares/auth');
+const { resolveSaleCategoryId } = require('../utils/saleRevenueCategory');
 const logger = require('../utils/logger');
+
+async function loadCategoriesForSales(companyId) {
+  const { data, error } = await supabase
+    .from('categories')
+    .select('id,name,type,color')
+    .eq('active', true)
+    .or(`company_id.eq.${companyId},company_id.is.null`);
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+function enrichRowsWithRevenueCategory(rows, cats) {
+  return (rows || []).map((r) => {
+    const category_id = resolveSaleCategoryId(r, cats);
+    const cat = (cats || []).find((c) => c.id === category_id);
+    return {
+      ...r,
+      category_id,
+      categories: cat ? { id: cat.id, name: cat.name, color: cat.color } : null,
+    };
+  });
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -26,9 +49,12 @@ router.post('/:companyId/preview',
       const rows = await importer.parse(req.file.buffer, req.file.originalname, req.file.mimetype);
       if (!rows.length) {
         return res.status(422).json({
-          error: 'Nenhuma linha de venda reconhecida. Confira se há colunas de data e valor; em planilhas não padrão o sistema tenta interpretar com Gemini quando há GEMINI_API_KEY.',
+          error:
+            'Nenhuma linha de venda reconhecida. Confira colunas de data e valor (CSV separado por ; ou TAB). Com GEMINI_API_KEY o servidor tenta de novo com IA quando a heurística zera; opcional: SALES_IMPORT_GEMINI=always para sempre priorizar o Gemini em CSV/XLSX.',
         });
       }
+      const cats = await loadCategoriesForSales(req.companyId);
+      const rowsWithCat = enrichRowsWithRevenueCategory(rows, cats);
       const summary = importer.summary(rows);
       const excelSheets = [...new Set(
         rows.map((r) => (r.raw_data && r.raw_data.__sheet) || null).filter(Boolean)
@@ -41,7 +67,7 @@ router.post('/:companyId/preview',
       res.json({
         filename:   req.file.originalname,
         summary,
-        preview:    rows.slice(0, 10),    // primeiras 10 linhas
+        preview:    rowsWithCat.slice(0, 10),
         total_rows: rows.length,
         fieldMap:   Object.keys(rows[0] || {}),
         excel_sheets: excelSheets.length ? excelSheets : null,
@@ -64,6 +90,7 @@ router.post('/:companyId/import',
     try {
       const rows    = await importer.parse(req.file.buffer, req.file.originalname, req.file.mimetype);
       const summary = importer.summary(rows);
+      const cats = await loadCategoriesForSales(req.companyId);
 
       // Cria registro de importação
       const { data: importRecord, error: importErr } = await supabase
@@ -94,7 +121,7 @@ router.post('/:companyId/import',
       let inserted = 0;
       let lastBatchError = null;
       for (let i = 0; i < rows.length; i += BATCH) {
-        const batch = rows.slice(i, i + BATCH).map(r => ({
+        const batch = rows.slice(i, i + BATCH).map((r) => ({
           company_id:     req.companyId,
           import_id:      importRecord.id,
           sale_date:      r.sale_date,
@@ -105,6 +132,7 @@ router.post('/:companyId/import',
           quantity:       r.quantity ?? 1,
           cancelled:      r.cancelled ?? false,
           raw_data:       r.raw_data ?? {},
+          category_id:    resolveSaleCategoryId(r, cats),
         }));
         const { error } = await supabase.from('sales').insert(batch);
         if (error) {
@@ -141,7 +169,7 @@ router.get('/:companyId',
 
     let query = supabase
       .from('sales')
-      .select('*', { count: 'exact' })
+      .select('*, categories(id,name,color)', { count: 'exact' })
       .eq('company_id', req.companyId)
       .order('sale_date', { ascending: false })
       .range(Number(offset), Number(offset) + Number(limit) - 1);
@@ -192,7 +220,7 @@ router.get('/:companyId/imports/:importId',
 
     const { data: lines, error: lErr, count } = await supabase
       .from('sales')
-      .select('id, sale_date, gross_value, discount, net_value, payment_method, quantity, cancelled, raw_data', { count: 'exact' })
+      .select('id, sale_date, gross_value, discount, net_value, payment_method, quantity, cancelled, raw_data, category_id, categories(id,name,color)', { count: 'exact' })
       .eq('company_id', req.companyId)
       .eq('import_id', importId)
       .order('sale_date', { ascending: true })

@@ -40,20 +40,30 @@ class SalesImporter {
     else if (ext === 'xml')                    rows = await this.parseXML(buffer);
     else if (ext === 'ofx')                    rows = this.parseOFX(buffer.toString());
     else if (isImageSale) {
-      const result = await gemini.readDocument(buffer, mimetype || 'image/jpeg');
+      const result = await gemini.readDocument(buffer, mimetype || 'image/jpeg', filename);
       if (!result.success) throw new Error(`Erro ao analisar a imagem: ${result.error}`);
       rows = [this.fromGeminiDoc(result.data)];
     } else throw new Error(`Formato não suportado: ${ext}`);
 
-    const normalized = this.normalize(rows);
+    let normalized = this.normalize(rows);
     const isExcelOrCsv = ['csv', 'txt', 'xlsx', 'xls'].includes(ext);
-    if (normalized.length === 0 && isExcelOrCsv && process.env.GEMINI_API_KEY) {
+    const geminiMode = String(process.env.SALES_IMPORT_GEMINI || 'auto').toLowerCase();
+    if (isExcelOrCsv && process.env.GEMINI_API_KEY && geminiMode !== 'never') {
       try {
-        const gRows = await this.parseWithGemini(buffer, filename);
-        const gNorm = this.normalize(gRows);
-        if (gNorm.length) return gNorm;
+        const geminiNorm = await this.tryGeminiSalesAssist(buffer, filename, ext, rows, normalized, geminiMode);
+        if (geminiNorm?.length) normalized = geminiNorm;
       } catch (e) {
-        logger.warn('Gemini vendas (fallback):', e.message);
+        logger.warn('Gemini vendas:', e.message);
+      }
+      /* Heurística zerou tudo mas o arquivo tem corpo — segunda passagem direta no Gemini (ex.: colunas fora do padrão). */
+      if (!normalized.length) {
+        try {
+          const gRows = await this.parseWithGemini(buffer, filename);
+          const again = this.normalize(gRows);
+          if (again.length) normalized = again;
+        } catch (e) {
+          logger.warn('Gemini vendas (fallback 0 linhas):', e.message);
+        }
       }
     }
     if (isImageSale && normalized.length === 0) {
@@ -65,13 +75,64 @@ class SalesImporter {
   }
 
   /**
+   * Decide quando vale chamar o Gemini além do parser heurístico.
+   * SALES_IMPORT_GEMINI: auto (padrão) | always | never
+   */
+  async tryGeminiSalesAssist(buffer, filename, ext, rawRows, heuristicNorm, mode) {
+    const sourceCount = Array.isArray(rawRows) ? rawRows.length : 0;
+    const h = heuristicNorm || [];
+
+    const outrosRatio =
+      h.length > 0 ? h.filter((r) => r.payment_method === 'outros').length / h.length : 0;
+
+    const likelyMissedRows =
+      sourceCount >= 5
+      && h.length > 0
+      && (h.length + 1 < sourceCount || h.length < Math.max(5, Math.floor(sourceCount * 0.55)));
+
+    /* Muitas linhas brutas mas quase nada virou venda — colunas de valor/data provavelmente erradas. */
+    const heuristicSuspicious =
+      sourceCount >= 8 && h.length > 0 && h.length <= Math.max(2, Math.floor(sourceCount * 0.12));
+
+    const mostlyMissed =
+      sourceCount >= 6 && h.length > 0 && h.length < Math.max(3, Math.floor(sourceCount * 0.22));
+
+    const useGemini =
+      mode === 'always' ||
+      h.length === 0 ||
+      likelyMissedRows ||
+      heuristicSuspicious ||
+      mostlyMissed ||
+      (h.length >= 3 && outrosRatio >= 0.68);
+
+    if (!useGemini) return null;
+
+    const gRows = await this.parseWithGemini(buffer, filename);
+    const gNorm = this.normalize(gRows);
+
+    if (mode === 'always') {
+      if (gNorm.length) return gNorm;
+      return h.length ? h : null;
+    }
+    if (!gNorm.length) return null;
+    if (h.length === 0) return gNorm;
+    if (gNorm.length >= h.length) return gNorm;
+    if (likelyMissedRows && gNorm.length > h.length) return gNorm;
+    /* Não substituir heurística boa por Gemini com MENOS linhas (evita “só incompleto”). */
+    if (heuristicSuspicious && gNorm.length > h.length) return gNorm;
+    if (mostlyMissed && gNorm.length > h.length) return gNorm;
+    if (outrosRatio >= 0.68 && gNorm.length >= Math.ceil(h.length * 0.85)) return gNorm;
+    return null;
+  }
+
+  /**
    * Quando CSV/Excel não casa com colunas heurísticas, envia um trecho ao Gemini.
    */
   async parseWithGemini(buffer, filename) {
     const ext = filename.split('.').pop().toLowerCase();
     if (['csv', 'txt'].includes(ext)) {
       const text = buffer.toString('utf-8');
-      const head = text.slice(0, 14000);
+      const head = text.slice(0, 70000);
       if (!head.trim()) return [];
       const result = await gemini.readSalesSnippet(filename, 'CSV', head);
       if (!result.success) throw new Error(result.error || 'Gemini não interpretou o arquivo');
@@ -82,12 +143,14 @@ class SalesImporter {
       const workbook = xlsx.read(buffer, { type: 'buffer', cellDates: true });
       const names = workbook.SheetNames || [];
       const parts = [];
-      for (const sheetName of names.slice(0, 12)) {
+      const maxSheets = Math.min(120, names.length);
+      for (const sheetName of names.slice(0, maxSheets)) {
         const sheet = workbook.Sheets[sheetName];
         if (!sheet) continue;
+        this.expandWorksheetRange(sheet);
         const tsv = xlsx.utils.sheet_to_csv(sheet, { FS: '\t' });
         const lines = tsv.split('\n').filter((l) => l.replace(/[\s\t,;]/g, '').length > 0);
-        const snip = lines.slice(0, 55).join('\n');
+        const snip = lines.slice(0, 500).join('\n');
         if (snip.replace(/[\d./\-:\s]/g, '').trim().length < 6) continue;
         parts.push({ sheetName, snippet: snip });
       }
@@ -128,15 +191,52 @@ class SalesImporter {
   }
 
   parseCSV(buffer) {
-    const content = buffer.toString('utf-8');
-    // Tenta detectar separador (vírgula ou ponto-e-vírgula)
-    const separator = content.split(';').length > content.split(',').length ? ';' : ',';
+    const content = buffer.toString('utf-8').replace(/^\uFEFF/, '');
+    const first = content.split(/\r?\n/).find((l) => String(l).replace(/\s/g, '').length > 0) || '';
+    const tabs = (first.match(/\t/g) || []).length;
+    const semi = (first.match(/;/g) || []).length;
+    const commas = (first.match(/,/g) || []).length;
+    let delimiter = ',';
+    if (tabs >= 1 && tabs >= semi && tabs >= commas) delimiter = '\t';
+    else if (semi > commas) delimiter = ';';
     return csvParse(content, {
       columns: true,
       skip_empty_lines: true,
       trim: true,
-      delimiter: separator,
+      delimiter,
+      relax_column_count: true,
     });
+  }
+
+  /**
+   * Alguns arquivos vêm com `!ref` truncado; `sheet_to_json` respeita só esse range e perde linhas/colunas.
+   * Recalcula o retângulo a partir de todas as células presentes na aba.
+   */
+  expandWorksheetRange(sheet) {
+    if (!sheet || typeof sheet !== 'object') return;
+    let maxR = -1;
+    let maxC = -1;
+    for (const k of Object.keys(sheet)) {
+      if (k[0] === '!') continue;
+      if (!/^[A-Za-z]{1,4}\d+$/.test(k)) continue;
+      try {
+        const addr = xlsx.utils.decode_cell(k);
+        if (addr.r > maxR) maxR = addr.r;
+        if (addr.c > maxC) maxC = addr.c;
+      } catch (_) { /* ignore bad keys */ }
+    }
+    if (maxR < 0 || maxC < 0) return;
+    let s0 = { r: 0, c: 0 };
+    let ePrev = { r: maxR, c: maxC };
+    if (sheet['!ref']) {
+      try {
+        const prev = xlsx.utils.decode_range(sheet['!ref']);
+        s0 = prev.s || s0;
+        ePrev = prev.e;
+      } catch (_) { /* keep defaults */ }
+    }
+    const e = { r: Math.max(ePrev.r, maxR), c: Math.max(ePrev.c, maxC) };
+    sheet['!ref'] = xlsx.utils.encode_range({ s: s0, e });
   }
 
   /** @returns {{ rows: object[], sheetNames: string[] }} */
@@ -147,6 +247,7 @@ class SalesImporter {
     for (const sheetName of sheetNames) {
       const sheet = workbook.Sheets[sheetName];
       if (!sheet) continue;
+      this.expandWorksheetRange(sheet);
       const json = xlsx.utils.sheet_to_json(sheet, { defval: null });
       for (const r of json) {
         if (r == null || typeof r !== 'object') continue;
@@ -202,6 +303,11 @@ class SalesImporter {
       const dateFormatted = dateRaw.length >= 8
         ? `${dateRaw.slice(0,4)}-${dateRaw.slice(4,6)}-${dateRaw.slice(6,8)}`
         : null;
+      const memo = get('MEMO');
+      const name = get('NAME');
+      const payee = get('PAYEE');
+      const trnType = get('TRNTYPE');
+      const refNum = get('REFNUM');
       transactions.push({
         sale_date:      dateFormatted,
         gross_value:    Math.abs(amount),
@@ -210,8 +316,18 @@ class SalesImporter {
         payment_method: amount > 0 ? 'credito' : 'debito',
         quantity:       1,
         cancelled:      false,
-        memo:           get('MEMO'),
-        raw_data:       { amount, date: dateRaw, memo: get('MEMO') }
+        memo,
+        name,
+        payee,
+        raw_data:       {
+          amount,
+          date: dateRaw,
+          memo,
+          name,
+          payee,
+          trntype: trnType,
+          refnum: refNum,
+        }
       });
     }
     return transactions;
@@ -258,29 +374,98 @@ class SalesImporter {
       return v === '1' || v === 'true' || v === 's' || v === 'sim' || v.includes('cancel') || v.includes('estorn');
     };
 
+    const taxishKey = (k) => {
+      const lk = String(k || '').toLowerCase();
+      return /icms|ipi|pis|cofins|iss\b|imposto|substitu|retido|incluso|base\s*calc|diferencial|taxa\b|tarifa\b|juros|multa|desconto\s*fin/i.test(lk);
+    };
+
+    /** Escolhe a coluna de valor da venda (evita “Valor ICMS”, “Base …” como valor principal). */
+    const pickGrossColumnKey = (keys) => {
+      let bestK = null;
+      let bestS = -1e9;
+      for (const k of keys) {
+        if (String(k).startsWith('__')) continue;
+        if (taxishKey(k)) continue;
+        const nk = String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+        let s = 0;
+        if (nk.includes('vlrmov') || nk.includes('valormov') || nk.includes('valorlanc') || nk.includes('valoroper')) s += 80;
+        if (/valor.*(liqu|liq)/.test(nk) || nk.includes('valliq') || nk.includes('valorliq')) s += 70;
+        if (/valor.*(total|venda|receita)/.test(nk)) s += 55;
+        if (nk === 'valor' || /^valor$/i.test(String(k).trim())) s += 45;
+        if (nk.includes('valor')) s += 28;
+        if (nk.includes('venda') || nk.includes('receita') || nk.includes('totalvenda') || nk.includes('totvenda')) s += 40;
+        if (nk.includes('bruto') || nk.includes('gross') || nk.includes('amount') || nk.includes('vlvenda')) s += 38;
+        if (nk.includes('credit') || nk.includes('credito') || nk.includes('debit') || nk.includes('debito')) s += 12;
+        if (s > bestS) {
+          bestS = s;
+          bestK = k;
+        }
+      }
+      return bestS >= 12 ? bestK : null;
+    };
+
     const fieldMapForRow = (row) => {
       const keys = Object.keys(row).filter((k) => !String(k).startsWith('__'));
       const find = (...candidates) =>
-        keys.find((k) => candidates.some((c) => k.toLowerCase().replace(/[^a-z0-9]/g, '').includes(c)));
+        keys.find((k) => {
+          if (taxishKey(k)) return false;
+          const nk = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+          return candidates.some((c) => nk.includes(c));
+        });
+      const grossKey = pickGrossColumnKey(keys)
+        || find(
+          'bruto', 'gross', 'total', 'venda', 'receita', 'amount',
+          'vlrmov', 'vlmov', 'valorlan', 'vallan', 'vloper', 'vltrans',
+        )
+        || find('valor');
       return {
-        date: find('data', 'date', 'dt', 'dia', 'fecha'),
-        gross: find('bruto', 'gross', 'valor', 'total', 'venda', 'receita', 'amount'),
+        date: find('data', 'date', 'dt', 'dia', 'fecha', 'dtmov', 'dtmovimento', 'datalanc', 'dtlanc', 'datatrans', 'datahora'),
+        gross: grossKey,
         discount: find('desconto', 'discount', 'abatimento'),
-        net: find('liquido', 'liquid', 'net', 'final', 'recebido'),
+        net: find('liquido', 'liquid', 'net', 'final', 'recebido', 'valorliqu', 'valliq'),
         payment: find('forma', 'pagamento', 'payment', 'tipo', 'modalidade', 'meio', 'bandeira'),
         quantity: find('qtd', 'quantidade', 'qty', 'quantity', 'itens'),
         cancelled: find('cancelado', 'cancel', 'devolvido', 'estorno', 'status'),
       };
     };
 
+    const inferMoneyFromRow = (row, fieldMap) => {
+      let best = 0;
+      const skip = new Set();
+      for (const fk of ['date', 'gross', 'discount', 'net', 'payment', 'quantity', 'cancelled']) {
+        const k = fieldMap[fk];
+        if (k) skip.add(k);
+      }
+      for (const [k, v] of Object.entries(row)) {
+        if (String(k).startsWith('__') || skip.has(k)) continue;
+        const lk = String(k).toLowerCase();
+        if (taxishKey(k) || /saldo|balance|percent|taxa|tarifa|hora\b|agencia|agência|conta|banco|linha|sheet|row|idx|fone|cep|^cod|^id$/i.test(lk)) {
+          continue;
+        }
+        const n = parseNum(v);
+        if (!Number.isFinite(n) || Math.abs(n) < 1e-9 || Math.abs(n) > 1e13) continue;
+        if (typeof v === 'number' && Number.isInteger(v) && Math.abs(n) < 400
+          && !/valor|vlr|vl|cred|deb|total|preco|preço|oper|mov|lan/i.test(lk)) continue;
+        if (Math.abs(n) > Math.abs(best)) best = n;
+      }
+      return best;
+    };
+
     const today = new Date().toISOString().split('T')[0];
     return rows.map((row) => {
       const fieldMap = fieldMapForRow(row);
-      const gross = parseNum(fieldMap.gross ? row[fieldMap.gross] : 0);
+      let gross = parseNum(fieldMap.gross ? row[fieldMap.gross] : 0);
       const discount = parseNum(fieldMap.discount ? row[fieldMap.discount] : 0);
-      const net = fieldMap.net
+      let net = fieldMap.net
         ? parseNum(row[fieldMap.net])
         : gross - discount;
+      if (Math.abs(gross) < 1e-9 && Math.abs(net) < 1e-9) {
+        const inferred = inferMoneyFromRow(row, fieldMap);
+        if (Math.abs(inferred) > 1e-9) {
+          gross = inferred;
+          net = inferred;
+        }
+      }
       const saleDate = parseDate(fieldMap.date ? row[fieldMap.date] : null) || today;
 
       return {
@@ -293,7 +478,11 @@ class SalesImporter {
         cancelled: isCancelled(fieldMap.cancelled ? row[fieldMap.cancelled] : false),
         raw_data: row,
       };
-    }).filter((r) => r.gross_value > 0 || r.net_value > 0);
+    }).filter((r) => {
+      const g = parseFloat(r.gross_value) || 0;
+      const n = parseFloat(r.net_value) || 0;
+      return Math.abs(g) > 1e-9 || Math.abs(n) > 1e-9;
+    });
   }
 
   summary(rows) {
