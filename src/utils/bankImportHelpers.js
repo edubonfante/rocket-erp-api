@@ -165,6 +165,35 @@ function formatCategoryLabelsForAi(catList) {
  * Extratos em CSV costumam ter valor sempre positivo + coluna D/C ou tipo débito/crédito.
  * Sem isso, tudo vira receita quando `payment_method` não é `debito`.
  */
+
+/** Detecta e converte linha no formato Itau (colunas Debito/Credito separadas) */
+function tryParseItauRow(row) {
+  const keys = Object.keys(row || {});
+  const norm = k => String(k || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+  const debKey = keys.find(k => /^d[e]b(ito)?$/.test(norm(k)));
+  const credKey = keys.find(k => /^cr[e]d(ito)?$/.test(norm(k)));
+  const saldoKey = keys.find(k => /^saldo/.test(norm(k)));
+  if (!debKey && !credKey) return null;
+  const parseVal = v => {
+    if (v == null || v === '' || v === '-' || v === '--') return 0;
+    const s = String(v).trim().replace(/[R$s]/gi, '');
+    if (!s || s === '-') return 0;
+    const hasComma = s.includes(','), hasDot = s.includes('.');
+    let n = s;
+    if (hasComma && hasDot) n = s.lastIndexOf(',') > s.lastIndexOf('.') ? s.replace(/./g, '').replace(',', '.') : s.replace(/,/g, '');
+    else if (hasComma) n = s.replace(/./g, '').replace(',', '.');
+    const parsed = parseFloat(n);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  const debVal = debKey ? parseVal(row[debKey]) : 0;
+  const credVal = credKey ? parseVal(row[credKey]) : 0;
+  const saldoRaw = saldoKey ? row[saldoKey] : null;
+  const saldoVal = saldoRaw != null ? parseVal(saldoRaw) : null;
+  if (debVal > 0) return { amount: -Math.abs(debVal), balance: saldoVal };
+  if (credVal > 0) return { amount: Math.abs(credVal), balance: saldoVal };
+  return null;
+}
+
 function inferSignedAmountFromBankRow(r) {
   const raw = r.raw_data && typeof r.raw_data === 'object' ? r.raw_data : null;
   if (!raw) return null;
@@ -245,8 +274,8 @@ function toBankTransactions(rows) {
     if (r.raw_data && typeof r.raw_data.amount === 'number' && !Number.isNaN(r.raw_data.amount)) {
       signed = r.raw_data.amount;
     } else {
-      const inferred = inferSignedAmountFromBankRow(r);
-      if (inferred != null && Number.isFinite(inferred)) signed = inferred;
+      const itauParsed = tryParseItauRow(r); if (itauParsed != null) { signed = itauParsed.amount; if (itauParsed.balance != null && r.balance == null) r.balance = itauParsed.balance; } else { const inferred = inferSignedAmountFromBankRow(r);
+      if (inferred != null && Number.isFinite(inferred)) signed = inferred; }
     }
     if (signed == null && typeof r.net_value === 'number' && r.net_value !== 0) {
       signed = r.net_value;
