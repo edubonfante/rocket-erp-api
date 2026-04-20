@@ -200,7 +200,7 @@ function createGenerativeModel(apiKey) {
   if (!key) return null;
 
   const genAI = new GoogleGenerativeAI(key);
-  const modelName = (process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+  const modelName = (process.env.GEMINI_MODEL || 'gemini-2.0-flash').trim();
 
   /* Não usar responseMimeType aqui: com imagem/PDF (inlineData) a API costuma falhar (400) ou esvaziar a resposta. */
   const generationConfig = {
@@ -208,7 +208,7 @@ function createGenerativeModel(apiKey) {
     maxOutputTokens: 40960,
   };
 
-  const timeoutMs = Math.max(30000, Number(process.env.GEMINI_TIMEOUT_MS) || 120000);
+  const timeoutMs = Math.max(30000, Number(process.env.GEMINI_TIMEOUT_MS) || 180000);
 
   return genAI.getGenerativeModel(
     {
