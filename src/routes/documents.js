@@ -222,6 +222,31 @@ router.post('/:companyId/upload',
         excludeComprasFreteForStockLines: true,
       };
       let resolvedCategoryId = categoryIdIfAllowed(categoryId, uploadCats);
+      /* Override pos-Gemini: corrigir categorias erradas por produto */
+      if (docData.items && Array.isArray(docData.items)) {
+        docData.items = docData.items.map(function(item) {
+          const desc = String(item.description || '');
+          const cat = String(item.category || '').toLowerCase();
+          const ncm = String(item.ncm || '');
+          const dl = desc.toLowerCase();
+          const isChoc = dl.startsWith('choc') || dl.includes('chocolate') ||
+            dl.includes('kit kat') || dl.includes('kitkat') || dl.includes('cacau') ||
+            dl.includes('achocolatado') || dl.includes('nescau') || dl.includes('nutella') ||
+            /^(1801|1802|1803|1804|1805|1806)/.test(ncm);
+          if (isChoc) {
+            item.category = 'Sobremesa - Cafe';
+            item.ncm_category_reference = 'Sobremesa - Cafe';
+          }
+          const frutas = ['alface','tomate','cebola','alho','batata','cenoura','brocolis',
+            'abobrinha','pimentao','pepino','couve','espinafre','manga','banana','laranja',
+            'limao','abacaxi','morango','melao','melancia','mamao','kiwi','abacate'];
+          if (cat === 'hortifruti' && !frutas.some(function(f){ return dl.includes(f); })) {
+            item.category = 'Secos - Mercearia';
+            item.ncm_category_reference = 'Secos - Mercearia';
+          }
+          return item;
+        });
+      }
       /* Itens / NCM antes do suggested_category do documento — evita “Compras e fretes” genérico sobre NF de mercadoria. */
       if (!resolvedCategoryId && Array.isArray(docData.items) && docData.items.length) {
         for (const it of docData.items) {
