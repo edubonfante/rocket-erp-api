@@ -222,6 +222,25 @@ router.post('/:companyId/upload',
         excludeComprasFreteForStockLines: true,
       };
       let resolvedCategoryId = categoryIdIfAllowed(categoryId, uploadCats);
+      /* Override pos-Gemini: corrigir categorias erradas por produto */
+      if (docData.items && Array.isArray(docData.items)) {
+        docData.items = docData.items.map(item => {
+          const desc = String(item.description || '').toLowerCase();
+          const cat = String(item.category || '').toLowerCase();
+          const ncm = String(item.ncm || '');
+          // Chocolate: CHOC., Kit Kat, cacau, achocolatado  Sobremesa - Cafe
+          if (/^choc[. ]|chocolate|kit.?kat|cacau|achocolatado|nescau|nutella|bis |bis$|lacta|nestle choc/i.test(item.description || '') ||
+              /^(1801|1802|1803|1804|1805|1806)/.test(ncm)) {
+            item.category = 'Sobremesa - Cafe';
+            item.ncm_category_reference = 'Sobremesa - Cafe';
+          }
+          // Nao deixar Hortifruti para produtos industrializados
+            item.category = 'Secos - Mercearia';
+            item.ncm_category_reference = 'Secos - Mercearia';
+          }
+          return item;
+        });
+      }
       /* Itens / NCM antes do suggested_category do documento — evita “Compras e fretes” genérico sobre NF de mercadoria. */
       if (!resolvedCategoryId && Array.isArray(docData.items) && docData.items.length) {
         for (const it of docData.items) {
