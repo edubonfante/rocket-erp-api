@@ -113,7 +113,7 @@ REGRA DE OURO - ANTES DE TUDO:
 
 0) NCM (Nota Fiscal, NFC-e, cupom SAT/CF-e, XML/DANFE em imagem): em CADA item de produto, leia e preencha "ncm" com os 4 a 8 dígitos do código NCM quando existir no documento (colunas "NCM", "Cód. fiscal", "Classif. fiscal", etc.). O NCM é a referência fiscal principal da mercadoria no Brasil — use a família do NCM (capítulo/posição, ex.: bebidas, laticínios, café/chá, carnes) como base PRINCIPAL para escolher "category" e para aproximar ao PLANO DA EMPRESA. Se o cupom listar NCM por linha, um NCM por item; não invente dígitos.
 1) Quando houver correspondência clara, use EXATAMENTE um dos nomes do PLANO DA EMPRESA abaixo (cópia literal: acentos, hífens, maiúsculas).
-2) Se nenhum nome do plano servir, use o nome mais especifico do PLANO DA EMPRESA ou null. NUNCA use "Hortifruti" para produtos industrializados, chocolates, biscoitos, embutidos.
+2) Se nenhum nome do plano servir, use null  NUNCA invente uma categoria. NUNCA use "Laticinios" como categoria padrao/fallback para itens desconhecidos. Laticinios e SOMENTE para leite, queijo, iogurte, requeijao, manteiga, creme de leite, nata. NUNCA use "Hortifruti" para produtos industrializados, chocolates, biscoitos, embutidos. Produtos de limpeza (saco de lixo, detergente, esponja, vassoura, papel higienico, toalha de papel, guardanapo, pano de prato, rodo) = "Material de Higiene e Limpeza". Ovos = "Proteinas - Ovinos". Oleos de cozinha (soja, girassol, canola, azeite, gordura vegetal) = "Secos - Oleos e Azeites". Descartaveis/embalagens (pote, bandeja, sacola, filme, caixinha) = "Embalagens". Se o arquivo se chama "combustivel", "gasolina", "etanol", "diesel", "abastecimento" = "Despesas - Combustivel". Quando tiver duvida genuina sobre a categoria (confidence < 0.5), coloque null no campo category e use o campo observations para explicar a duvida.
 3) Cada linha em "items" é produto/serviço de ESTOQUE ou operação — use CMV / mercadoria / hortifruti / bebidas etc. NÃO use categoria de imposto (PIS, COFINS, ICMS na nota) para linhas de mercadoria; imposto só se a linha for explicitamente taxa/tributo avulso.
 4) Café, chá, achocolatado, sobremesa, chocolate e produtos com prefixo "CHOC." no nome: no PLANO DA EMPRESA use SEMPRE "Sobremesa - Cafe" (NCM cap.18: 1801-1806 = cacau e chocolate). Kit Kat, Bis, Serenata, Lacta, Nestlé chocolate = "Sobremesa - Cafe". NUNCA classifique chocolate como Hortifruti. NUNCA use "Compras e fretes" ou "Frete e transporte" para produto de nota fiscal.
 5) Embutidos e charcutaria (salsicha, mortadela, presunto, salame, linguiça, bacon, peito de peru, fiambre, apresuntado, defumados): use "Frios e Embutidos" do plano — NUNCA classifique como "Secos" / "Alimentos secos" / mercearia genérica só por ser alimento.
@@ -191,6 +191,8 @@ Categorias CMV / NCM (use EXATAMENTE um destes rótulos no campo "category" quan
 - Outros Custos Variáveis
 
 IMPORTANTE: Álcool de limpeza / papel higiene / detergente = categoria de higiene do PLANO DA EMPRESA (não use esta lista CMV de alimento para limpeza).
+NOME DO ARQUIVO: Se o documento tiver pouca informao visvel, use o nome do arquivo como dica. Ex: "combustivel.jpg" = "Despesas - Combustivel"; "gasolina" = "Despesas - Combustivel"; "agua_mineral" = Bebidas.
+DVIDA: Se confidence < 0.6, coloque null em category do item e explique em observations.
 ${planBlock}
 Seja preciso. Se não tiver certeza de um campo, use null.`;
 }
