@@ -33,13 +33,13 @@ function inferRetailNcmHighlight(item) {
 
   // Cafe, cha (NCM cap. 09)
   const lexCafe = /\b(cafe|expresso|cappuccino|cha |nescafe|pilao|nespresso|dolce gusto)\b/.test(blob);
-  const ncmCafe = /^(0901|0902|0903|0904|0905|0906|0907|0908|0909|0910)/.test(digits);
-  if (lexCafe || ncmCafe) return 'Sobremesa - Cafe';
+  const ncmCafe = /^(0901|0902|0903)/.test(digits); // so cafe, cha, mate - especiarias tratadas em lexTemp/ncmTemp abaixo
+  if (lexCafe || ncmCafe) return 'Secos - Cafe e Similares';
 
   // Sorvete (NCM 2105)
   const lexSorv = /\b(sorvete|gelado|picole|sundae|milkshake)\b/.test(blob);
   const ncmSorv = /^(2105)/.test(digits);
-  if (lexSorv || ncmSorv) return 'Sobremesa - Sobremesa';
+  if (lexSorv || ncmSorv) return 'Sobremesa - Cafe';
 
   // Temperos e condimentos (NCM cap. 09 = especiarias, 21 = preparacoes)
   const lexTemp = /\b(canela|limao pepper|pimenta|tempero|oregano|colorau|cominho|mostarda po|curry|paprica|louro|curcuma|gengibre po|cravo|noz moscada|ervas finas)\b/.test(blob);
