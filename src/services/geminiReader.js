@@ -208,7 +208,7 @@ function createGenerativeModel(apiKey) {
     maxOutputTokens: 40960,
   };
 
-  const timeoutMs = Math.max(30000, Number(process.env.GEMINI_TIMEOUT_MS) || 180000);
+  const timeoutMs = Math.max(30000, Number(process.env.GEMINI_TIMEOUT_MS) || 90000);
 
   return genAI.getGenerativeModel(
     {

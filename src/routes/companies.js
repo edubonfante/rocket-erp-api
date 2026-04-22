@@ -65,7 +65,16 @@ router.get('/:id/categories',
     if (!all) q = q.eq('active', true);
     const { data, error } = await q;
     if (error) return res.status(500).json({ error: error.message });
-    res.json({ data });
+      // Deduplicar: empresa (company_id != null) tem prioridade sobre global
+      const seen = new Map();
+      for (const cat of (data || [])) {
+        const k = (cat.name || '').trim().toLowerCase();
+        if (!seen.has(k) || cat.company_id !== null) seen.set(k, cat);
+      }
+      const deduped = [...seen.values()].sort((a, b) =>
+        (a.name || '').localeCompare(b.name || '', 'pt-BR', { sensitivity: 'base' })
+      );
+      res.json({ data: deduped });
   }
 );
 
