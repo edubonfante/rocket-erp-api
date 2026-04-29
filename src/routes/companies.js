@@ -127,7 +127,7 @@ router.patch('/:id/categories/:catId',
       });
     }
 
-    const allowed = ['name', 'type', 'color', 'account_code', 'active'];
+    const allowed = ['name', 'type', 'color', 'account_code', 'active', 'dre_group'];
     const updates = Object.fromEntries(
       Object.entries(req.body || {}).filter(([k, v]) => allowed.includes(k) && v !== undefined),
     );
