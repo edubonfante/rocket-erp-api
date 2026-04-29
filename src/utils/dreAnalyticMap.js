@@ -12,7 +12,44 @@ const { payableDreBucket } = require('./dreBuckets');
 function classifyPayableForDre(cat) {
   const code = String(cat?.account_code || '').trim();
   const name = String(cat?.name || '—').trim() || '—';
+  // dre_group definido pelo Kanban do plano de contas tem prioridade
+  if (cat?.dre_group) {
+    const _g = cat.dre_group;
+    const _n = String(cat?.name || '-').trim() || '-';
+    const _c = String(cat?.account_code || '').trim();
+    const _bmap = {
+      cmv:          { drillBucket: 'cmv',           l2: 'CMV / Custos sobre vendas',    l3: _n, code: _c },
+      personnel:    { drillBucket: 'personnel',     l2: 'Despesas com Pessoal',          l3: _n, code: _c },
+      admin:        { drillBucket: 'admin',         l2: 'Despesas Operacionais (Fixas)', l3: _n, code: _c },
+      variable:     { drillBucket: 'variable',      l2: 'Despesas Variveis',           l3: _n, code: _c },
+      financial:    { drillBucket: 'financial',     l2: 'Despesas Financeiras',          l3: _n, code: _c },
+      revenue:      { drillBucket: 'gross_revenue', l2: 'Receita Bruta de Vendas',       l3: _n, code: _c },
+      tax:          { drillBucket: 'taxes_on_sales',l2: 'Impostos sobre vendas',         l3: _n, code: _c },
+      discount:     { drillBucket: 'discounts',     l2: 'Dedues / devolues',         l3: _n, code: _c },
+      irpj:         { drillBucket: 'irpj',          l2: 'IRPJ / CSLL',                  l3: _n, code: _c },
+      investment:   { drillBucket: 'investments',   l2: 'Investimentos / CAPEX',         l3: _n, code: _c },
+      non_operating:{ drillBucket: 'non_operating', l2: 'No Operacional',              l3: _n, code: _c },
+    };
+    if (_bmap[_g]) return _bmap[_g];
+  }
+  const legacy = payableDreBucket(name);
 
+  const byLegacy = classifyPayableByLegacy(legacy, name, code);
+  const byCode = classifyPayableByCode(code, name);
+  if (!byCode) return byLegacy;
+
+  /*
+   * account_code pode ficar defasado quando o usuário reorganiza categorias
+   * no Kanban do plano de contas. Em caso de conflito, priorizamos um bucket
+   * semântico forte (name-based) para manter a DRE coerente com o plano atual.
+   */
+  if (legacy !== 'admin' && byLegacy.drillBucket !== byCode.drillBucket) {
+    return byLegacy;
+  }
+  return byCode;
+}
+
+function classifyPayableByCode(code, name) {
   if (code.startsWith('02.03.') || code.startsWith('02.01.01')) {
     let l2 = 'Demais custos / CMV';
     if (code.startsWith('02.03.02')) l2 = 'Bebidas (CMV)';
@@ -45,8 +82,10 @@ function classifyPayableForDre(cat) {
   if (code.startsWith('04.') || code.startsWith('05.')) {
     return { drillBucket: 'admin', l2: 'Investimentos e não operacional', l3: name, code };
   }
+  return null;
+}
 
-  const legacy = payableDreBucket(name);
+function classifyPayableByLegacy(legacy, name, code) {
   const mapLegacy = {
     cmv: { l2: 'CMV (plano legado)', l3: name },
     pessoal: { l2: 'Pessoal (plano legado)', l3: name },

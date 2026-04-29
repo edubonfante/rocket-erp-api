@@ -21,4 +21,21 @@ describe('classifyPayableForDre', () => {
     const r = classifyPayableForDre({ account_code: '03.01.01.01', name: 'Salários' });
     expect(r.drillBucket).toBe('pessoal');
   });
+
+  test('prioriza nome quando account_code está defasado após reorganização no Kanban', () => {
+    const r = classifyPayableForDre({
+      account_code: '02.03.01.01',
+      name: 'Salários e encargos',
+    });
+    expect(r.drillBucket).toBe('pessoal');
+    expect(r.l2).toMatch(/Pessoal/i);
+  });
+
+  test('mantém account_code quando nome é genérico (sem sinal forte)', () => {
+    const r = classifyPayableForDre({
+      account_code: '03.04.02.01',
+      name: 'Despesa operacional',
+    });
+    expect(r.drillBucket).toBe('financeiras');
+  });
 });

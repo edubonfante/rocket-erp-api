@@ -36,7 +36,8 @@ function monthLabelPt(ym) {
 
 /**
  * Agrega DRE a partir de linhas já filtradas (vendas, payables, créditos banco).
- * Usa `categories.account_code` do plano (varejo) quando existir; senão cai no legado em dreBuckets.
+ * Usa `categories.account_code` e reconcilia com semântica do `name` para evitar
+ * classificação errada quando o código fica defasado após reorganização no Kanban.
  * @param {{ sale_date?: string, gross_value?: string|number, discount?: string|number, category_id?: string, categories?: { id?: string, name?: string, account_code?: string|null, type?: string|null } }[]} sales
  * @param {{ due_date?: string, amount?: string|number, category_id?: string, categories?: { id?: string, name?: string, account_code?: string|null, type?: string|null } }[]} payables
  * @param {{ entry_date?: string, amount?: string|number, category_id?: string, categories?: { id?: string, name?: string, account_code?: string|null, type?: string|null } }[]} bankCredits
