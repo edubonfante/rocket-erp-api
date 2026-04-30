@@ -175,11 +175,11 @@ async function computeDre(supabase, companyId, dateFrom, dateTo) {
 
   const { data: payables, error: pErr } = await supabase
     .from('payables')
-    .select('due_date, amount, category_id, categories(id,name,account_code,type)')
+    .select('due_date, issue_date, amount, category_id, categories(id,name,account_code,type)')
     .eq('company_id', companyId)
     .in('status', ['open', 'overdue', 'paid'])
-    .gte('due_date', df)
-    .lte('due_date', dt);
+    .gte('issue_date', df)
+    .lte('issue_date', dt);
   if (pErr) throw new Error(pErr.message);
 
   const { data: bankCredits, error: bcErr } = await supabase
@@ -208,7 +208,7 @@ async function computeDre(supabase, companyId, dateFrom, dateTo) {
     const byMonth = {};
     for (const mk of monthKeys) {
       const s = (sales || []).filter((r) => String(r.sale_date || '').slice(0, 7) === mk);
-      const p = (payables || []).filter((r) => String(r.due_date || '').slice(0, 7) === mk);
+      const p = (payables || []).filter((r) => String(r.issue_date || r.due_date || '').slice(0, 7) === mk);
       const b = (bankCredits || []).filter((r) => String(r.entry_date || '').slice(0, 7) === mk);
       byMonth[mk] = aggregateDreFromData(s, p, b);
     }

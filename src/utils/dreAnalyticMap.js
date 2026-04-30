@@ -59,22 +59,26 @@ function classifyPayableByCode(code, name) {
     return { drillBucket: 'cmv', l2, l3: name, code };
   }
   if (code.startsWith('02.01.02') || code.startsWith('02.01.03')) {
-    return { drillBucket: 'devolucoes', l2: 'Deduções de receita', l3: name, code };
+    return { drillBucket: 'discounts', l2: 'Deduções de receita', l3: name, code };
   }
   if (code.startsWith('02.02.01.02') || code.startsWith('02.02.01.03')) {
     return { drillBucket: 'irpj', l2: 'IRPJ e CSLL', l3: name, code };
   }
+  if (code.startsWith('02.02.01.01') || code.startsWith('02.02.01.04') || code.startsWith('02.02.01.05')) {
+    // DAS / Simples Nacional / Outros tributos sobre resultado -> irpj
+    return { drillBucket: 'irpj', l2: 'IRPJ / CSLL / DAS', l3: name, code };
+  }
   if (code.startsWith('02.02.')) {
-    return { drillBucket: 'impostos_vendas', l2: 'Impostos sobre vendas / Simples', l3: name, code };
+    return { drillBucket: 'taxes_on_sales', l2: 'Impostos sobre vendas / Simples', l3: name, code };
   }
   if (code.startsWith('03.01.')) {
-    return { drillBucket: 'pessoal', l2: 'Despesas com pessoal', l3: name, code };
+    return { drillBucket: 'personnel', l2: 'Despesas com Pessoal', l3: name, code };
   }
   if (code.startsWith('03.04.')) {
-    return { drillBucket: 'financeiras', l2: 'Despesas financeiras', l3: name, code };
+    return { drillBucket: 'financial', l2: 'Despesas Financeiras', l3: name, code };
   }
   if (code.startsWith('03.03.')) {
-    return { drillBucket: 'admin', l2: 'Marketing e propaganda', l3: name, code };
+    return { drillBucket: 'variable', l2: 'Despesas Variveis', l3: name, code };
   }
   if (code.startsWith('03.02.')) {
     return { drillBucket: 'admin', l2: 'Administrativo, ocupação e utilidades', l3: name, code };
