@@ -76,6 +76,11 @@ function parseGeminiJson(text) {
   }
 }
 
+const FOOD_SERVICE_SCOPE_BLOCK = `CONTEXTO DE NEGÓCIO (MANDATÓRIO):
+- A empresa analisada é 100% FOOD SERVICE (restaurante, lanchonete, bar, cafeteria, delivery e operação de cozinha).
+- Priorize interpretação de produtos, insumos, receitas e despesas típicas de food service.
+- Não force categoria quando não houver evidência textual clara; prefira null com baixa confiança.`;
+
 function docSafetySettings() {
   const t = HarmBlockThreshold.BLOCK_ONLY_HIGH;
   return [
@@ -126,6 +131,8 @@ ${slice.map((n) => `- ${String(n).replace(/\s+/g, ' ').slice(0, 600)}`).join('\n
       : '';
 
   return `Você é um sistema especialista em contabilidade brasileira.
+${FOOD_SERVICE_SCOPE_BLOCK}
+
 Analise este documento fiscal/financeiro e extraia TODOS os dados disponíveis.
 Responda SOMENTE com um JSON válido, sem markdown, sem explicações.
 
@@ -460,6 +467,8 @@ Regras:
 
     const snippet = String(textSnippet || '').slice(0, 70000);
     const prompt = `Você interpreta exportações de vendas de PDV/ERP brasileiros.
+${FOOD_SERVICE_SCOPE_BLOCK}
+
 Arquivo: ${filename}
 Planilha/bloco: ${sheetLabel}
 
@@ -525,6 +534,8 @@ Regras:
       .join('\n\n')
       .slice(0, 80000);
     const prompt = `Você interpreta arquivos de VENDAS (Excel) brasileiros com UMA OU MAIS ABAS.
+${FOOD_SERVICE_SCOPE_BLOCK}
+
 Arquivo: ${filename}
 
 Abaixo há trechos de várias abas (cabeçalho + linhas). Cada aba pode ter colunas diferentes.
@@ -573,6 +584,8 @@ Se não houver vendas: {"sales":[]}.`;
     if (!model) return { category: null, confidence: 0, reason: 'GEMINI_API_KEY ausente' };
 
     const prompt = `Você é um contador brasileiro especialista em classificação contábil.
+${FOOD_SERVICE_SCOPE_BLOCK}
+
 Classifique o lançamento bancário abaixo escolhendo NO MÁXIMO UMA categoria da lista (ou deixe category null se não houver evidência clara no texto).
 
 Regras:
@@ -580,6 +593,7 @@ Regras:
 - NÃO invente contexto (ex.: não assuma "compra de mercadoria" só porque é um pagamento genérico).
 - NÃO escolha categoria genérica se o texto não contiver palavras relacionadas a ela.
 - Se o texto for vago ("TRANSF", "PAG", "PIX") sem setor ou fornecedor identificável, use category: null e confidence baixa.
+- Para favorecidos sem vínculo claro com food service, mantenha category null (não inferir categoria por suposição).
 - Pagamentos a fabricantes/distribuidores de bebidas (Coca-Cola, Ambev, Pepsico, refrigerante, cerveja, água, suco industrializado) → categoria de CMV / mercadoria / bebidas do plano, NUNCA "Frete" nem "Impostos" salvo o texto citar explicitamente frete ou tributo.
 - "Frete e transporte" só se houver palavras como frete, transportadora, logística, correios, entrega — não use frete só porque o valor é alto ou é PIX para fornecedor.
 
