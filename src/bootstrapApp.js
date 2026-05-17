@@ -44,11 +44,124 @@ function corsOriginAllowed(origin) {
   return false;
 }
 
+function renderLandingPage() {
+  return `<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rocket ERP</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: Inter, Arial, sans-serif;
+        background: #f4f6f8;
+        color: #151b26;
+      }
+
+      .shell {
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 48px 24px;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 32px;
+        align-items: center;
+      }
+
+      .hero-copy h1 {
+        margin: 0 0 12px;
+        font-size: clamp(1.9rem, 3.6vw, 2.8rem);
+      }
+
+      .hero-copy p {
+        margin: 0;
+        line-height: 1.55;
+        color: #334155;
+      }
+
+      .video-placeholder {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        background: #0f172a;
+        border-radius: 16px;
+        display: grid;
+        place-items: center;
+        text-align: center;
+        padding: 20px;
+        box-shadow: 0 16px 36px rgba(15, 23, 42, 0.22);
+      }
+
+      .play-button {
+        width: 74px;
+        height: 74px;
+        border: 0;
+        border-radius: 999px;
+        background: #f97316;
+        color: #ffffff;
+        font-size: 30px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 14px;
+        cursor: default;
+      }
+
+      .video-placeholder p {
+        margin: 0;
+        color: #e2e8f0;
+        font-weight: 600;
+      }
+
+      @media (max-width: 900px) {
+        .hero {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div class="hero-copy">
+          <h1>Rocket ERP API</h1>
+          <p>Serviço ativo para autenticação, cadastros, financeiro e relatórios.</p>
+        </div>
+
+        <div class="video-placeholder" aria-label="Placeholder de vídeo">
+          <div>
+            <button class="play-button" type="button" aria-hidden="true">&#9654;</button>
+            <p>Em breve — demo do sistema</p>
+          </div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>`;
+}
+
 /**
  * Middlewares + rotas (carregado depois de app.listen no index — Cloud Run vê /health cedo).
  * @param {import('express').Express} app
  */
 function bootstrapApp(app) {
+  app.get('/', (req, res) => {
+    res.type('html').send(renderLandingPage());
+  });
+
   app.use(helmet());
 
   app.use(
