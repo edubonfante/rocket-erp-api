@@ -13,6 +13,7 @@ const docRoutes = require('./routes/documents');
 const reportRoutes = require('./routes/reports');
 const userRoutes = require('./routes/users');
 const logRoutes = require('./routes/logs');
+const privacyRoutes = require('./routes/privacy');
 
 const { errorHandler } = require('./middlewares/errorHandler');
 
@@ -81,6 +82,7 @@ function bootstrapApp(app) {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+  app.use('/', privacyRoutes);
   app.use('/api/auth', authRoutes);
   app.use('/api/companies', companyRoutes);
   app.use('/api/nfe', nfeRoutes);
