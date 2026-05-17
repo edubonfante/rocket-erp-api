@@ -84,12 +84,12 @@ router.post('/:id/categories', authenticate, (req, res, next) => {
   next();
 }, requireCompanyAccess, async (req, res) => {
   const companyId = req.companyId;
-  const { name, type = 'despesa', color = '#94a3b8', account_code: accountCode } = req.body;
+  const { name, type = 'despesa', color = '#7c7c8a', account_code: accountCode } = req.body;
   const trimmed = String(name || '').trim().slice(0, 200);
   if (!trimmed) return res.status(400).json({ error: 'Nome da categoria é obrigatório' });
   const allowedTypes = ['despesa', 'receita', 'ambos'];
   const t = allowedTypes.includes(type) ? type : 'despesa';
-  const col = String(color || '').trim().slice(0, 7) || '#94a3b8';
+  const col = String(color || '').trim().slice(0, 7) || '#7c7c8a';
   const code = accountCode != null ? String(accountCode).trim().slice(0, 40) : '';
   const insertPayload = { company_id: companyId, name: trimmed, type: t, color: col };
   if (code) insertPayload.account_code = code;
@@ -141,7 +141,7 @@ router.patch('/:id/categories/:catId',
       if (!allowedTypes.includes(updates.type)) delete updates.type;
     }
     if (updates.color != null) {
-      updates.color = String(updates.color).trim().slice(0, 7) || '#94a3b8';
+      updates.color = String(updates.color).trim().slice(0, 7) || '#7c7c8a';
     }
     if (updates.account_code != null) {
       updates.account_code = String(updates.account_code).trim().slice(0, 40) || null;
