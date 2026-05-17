@@ -2,6 +2,30 @@ const router  = require('express').Router();
 const supabase = require('../db');
 const { authenticate, requireAdmin, requireCompanyAccess } = require('../middlewares/auth');
 
+const ACTIVE_RESTAURANTS_LABEL_THRESHOLD = 12;
+
+function formatActiveRestaurantsLabel(activeCount) {
+  const safeCount = Number.isFinite(activeCount) ? Math.max(0, activeCount) : 0;
+  if (safeCount >= ACTIVE_RESTAURANTS_LABEL_THRESHOLD) {
+    return `${ACTIVE_RESTAURANTS_LABEL_THRESHOLD}+ Restaurantes ativos`;
+  }
+  return `${safeCount} Restaurantes ativos`;
+}
+
+// GET /api/companies/active-restaurants — métrica pública para destaque no frontend
+router.get('/active-restaurants', async (req, res) => {
+  const { count, error } = await supabase
+    .from('companies')
+    .select('id', { count: 'exact', head: true })
+    .eq('active', true);
+  if (error) return res.status(500).json({ error: error.message });
+  const activeRestaurants = Number.isFinite(count) ? count : 0;
+  return res.json({
+    active_restaurants: activeRestaurants,
+    label: formatActiveRestaurantsLabel(activeRestaurants),
+  });
+});
+
 // GET /api/companies
 router.get('/', authenticate, async (req, res) => {
   let query = supabase.from('companies').select('id,name,cnpj,trade_name,email,active').eq('active', true).order('name');
