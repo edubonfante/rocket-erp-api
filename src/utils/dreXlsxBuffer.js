@@ -1,6 +1,23 @@
 const ExcelJS = require('exceljs');
 
 const fmt = (v) => Math.round((v || 0) * 100) / 100;
+const STATS_BAR_BORDER = Object.freeze({
+  style: 'thin',
+  color: { argb: 'FFD9D9D9' },
+});
+
+function applyTopBottomBorder(row, maxCol = row.cellCount) {
+  const endCol = Math.max(1, maxCol || 1);
+  for (let c = 1; c <= endCol; c += 1) {
+    const cell = row.getCell(c);
+    const border = cell.border || {};
+    cell.border = {
+      ...border,
+      top: STATS_BAR_BORDER,
+      bottom: STATS_BAR_BORDER,
+    };
+  }
+}
 
 /**
  * Gera workbook .xlsx da DRE (ExcelJS — só escrita, uso no servidor).
@@ -33,7 +50,8 @@ async function buildDreXlsxBuffer(d, dateFrom, dateTo) {
   ];
   for (const row of lines) ws.addRow(row);
   ws.addRow([]);
-  ws.addRow(['% s/ receita líquida', '']);
+  const statsBarRow = ws.addRow(['% s/ receita líquida', '']);
+  applyTopBottomBorder(statsBarRow, 2);
   ws.addRow(['Margem bruta (%)', d.gross_margin]);
   ws.addRow(['Margem EBITDA (%)', d.ebitda_margin]);
   ws.addRow(['Margem líquida (%)', d.net_margin]);
