@@ -1,6 +1,14 @@
 const ExcelJS = require('exceljs');
 
 const fmt = (v) => Math.round((v || 0) * 100) / 100;
+const DISPLAY_FONT = Object.freeze({ name: 'Syne', bold: true });
+const DISPLAY_TITLE_FONT = Object.freeze({ ...DISPLAY_FONT, size: 16 });
+
+function applyRowFont(row, font = DISPLAY_FONT) {
+  row.eachCell({ includeEmpty: true }, (cell) => {
+    cell.font = { ...font };
+  });
+}
 
 /**
  * Gera workbook .xlsx da DRE (ExcelJS — só escrita, uso no servidor).
@@ -11,10 +19,10 @@ async function buildDreXlsxBuffer(d, dateFrom, dateTo) {
   wb.creator = 'Rocket ERP';
 
   const ws = wb.addWorksheet('DRE consolidado', { views: [{ state: 'frozen', ySplit: 4 }] });
-  ws.addRow(['DRE — Demonstração do Resultado (período consolidado)']);
-  ws.addRow(['Período', String(dateFrom || ''), String(dateTo || '')]);
+  applyRowFont(ws.addRow(['DRE — Demonstração do Resultado (período consolidado)']), DISPLAY_TITLE_FONT);
+  applyRowFont(ws.addRow(['Período', String(dateFrom || ''), String(dateTo || '')]));
   ws.addRow([]);
-  ws.addRow(['Linha', 'Valor (R$)']);
+  applyRowFont(ws.addRow(['Linha', 'Valor (R$)']));
   const lines = [
     ['1. Receita Bruta de Vendas', d.gross_revenue],
     ['(-) Devoluções / Cancelamentos', d.discounts],
@@ -33,7 +41,7 @@ async function buildDreXlsxBuffer(d, dateFrom, dateTo) {
   ];
   for (const row of lines) ws.addRow(row);
   ws.addRow([]);
-  ws.addRow(['% s/ receita líquida', '']);
+  applyRowFont(ws.addRow(['% s/ receita líquida', '']));
   ws.addRow(['Margem bruta (%)', d.gross_margin]);
   ws.addRow(['Margem EBITDA (%)', d.ebitda_margin]);
   ws.addRow(['Margem líquida (%)', d.net_margin]);
@@ -48,7 +56,7 @@ async function buildDreXlsxBuffer(d, dateFrom, dateTo) {
   const det = d.expenses_detail || [];
   if (det.length) {
     const ws2 = wb.addWorksheet('Despesas por categoria');
-    ws2.addRow(['Categoria', 'Valor (R$)', '% receita líq.']);
+    applyRowFont(ws2.addRow(['Categoria', 'Valor (R$)', '% receita líq.']));
     for (const e of det) {
       ws2.addRow([e.name, Number(e.amount) || 0, Number(e.pct) || 0]);
     }
@@ -66,7 +74,7 @@ async function buildDreXlsxBuffer(d, dateFrom, dateTo) {
     const keys = mm.month_keys;
     const wsm = wb.addWorksheet('DRE por mês', { views: [{ state: 'frozen', xSplit: 1, ySplit: 2 }] });
     const head = ['Linha', ...keys.map((k) => mm.month_labels[k] || k), 'Total período', 'Média mensal'];
-    wsm.addRow(head);
+    applyRowFont(wsm.addRow(head));
     for (const row of mm.rows) {
       const cells = [
         row.label,
@@ -124,7 +132,7 @@ async function buildDreXlsxBuffer(d, dateFrom, dateTo) {
     }
 
     const wsh = wb.addWorksheet('Análise horizontal');
-    wsh.addRow(['Métrica', 'De', 'Para', 'Valor anterior', 'Valor atual', 'Variação %']);
+    applyRowFont(wsh.addRow(['Métrica', 'De', 'Para', 'Valor anterior', 'Valor atual', 'Variação %']));
     for (const h of mm.horizontal || []) {
       wsh.addRow([
         h.metric_label,
@@ -144,10 +152,10 @@ async function buildDreXlsxBuffer(d, dateFrom, dateTo) {
 
     const wsv = wb.addWorksheet('Análise vertical');
     for (const block of mm.vertical || []) {
-      wsv.addRow([
+      applyRowFont(wsv.addRow([
         `% sobre receita líquida — ${block.month_label} (receita líquida do mês: R$ ${block.net_revenue})`,
-      ]);
-      wsv.addRow(['Linha', 'Valor R$', '% rec. líquida']);
+      ]));
+      applyRowFont(wsv.addRow(['Linha', 'Valor R$', '% rec. líquida']));
       for (const ln of block.lines || []) {
         wsv.addRow([ln.label, ln.value, ln.pct_of_net_revenue == null ? '—' : ln.pct_of_net_revenue]);
       }
