@@ -17,6 +17,15 @@ const parsed = parseInt(portStr, 10);
 const PORT = Number.isFinite(parsed) && parsed > 0 ? parsed : 3001;
 const LISTEN_HOST = (process.env.LISTEN_HOST || '0.0.0.0').trim() || '0.0.0.0';
 
+app.get('/', (req, res) =>
+  res.json({
+    service: 'Rocket ERP API',
+    status: 'online',
+    health: '/health',
+    apiHealth: '/api/health',
+  }),
+);
+
 const healthHandler = (req, res) => res.json({ status: 'ok', ts: new Date() });
 app.get('/health', healthHandler);
 app.get('/api/health', healthHandler);
