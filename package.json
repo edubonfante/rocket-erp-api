@@ -1,7 +1,7 @@
 {
   "name": "rocket-erp-backend",
   "version": "1.0.0",
-  "description": "Rocket ERP — API Backend",
+  "description": "DRE mensal, CMV semanal, conciliação bancária e relatórios em um único sistema. Feito por quem entende de food service.",
   "main": "src/index.js",
   "scripts": {
     "dev": "nodemon src/index.js",
